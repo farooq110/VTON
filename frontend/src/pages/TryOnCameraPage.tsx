@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { Camera, Check, CheckSquare, Image as ImageIcon, Maximize2, RefreshCw, Square, Trash2, X } from "lucide-react";
+import { Camera, Check, CheckSquare, Download, Image as ImageIcon, Loader2, Maximize2, RefreshCw, Square, Trash2, X } from "lucide-react";
 import { useCamera } from "@/hooks/useCamera";
+import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { useAuthStore } from "@/lib/store";
 import { useProducts } from "@/hooks/useProducts";
 import { GlobalHeader } from "@/components/layout/GlobalHeader";
@@ -10,6 +11,7 @@ import { useToast } from "@/components/ui/toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatBytes, formatRelativeTime, resolveProductImage, onImageError } from "@/lib/utils";
+import { DETECTION_MODELS } from "@/lib/constants";
 import type { SavedCaptureImage } from "@/types";
 
 type Phase = "intro" | "camera" | "countdown" | "captured-preview";
@@ -19,6 +21,39 @@ export function TryOnCameraPage() {
   const { data: products } = useProducts();
   const { savedImages, addSavedImage, removeSavedImage, setActiveCapture, settings, selectedProductId } = useAuthStore();
   const { toast } = useToast();
+  const { isModelCached, preloadModel, modelProgress } = usePoseDetection();
+
+  // ─── Model download gate ──────────────────────────────────────────────
+  // The inline "model not downloaded" banner is visible ONLY when the model
+  // is NOT cached. Once download succeeds, the banner hides automatically
+  // (single-source-of-truth: `modelReady` reads from `isModelCached` which
+  // is backed by the global `loadedModels` set + pub/sub).
+  const [downloadingModel, setDownloadingModel] = useState(false);
+  const activeModel = DETECTION_MODELS.find((m) => m.id === settings.activeModelId);
+  const modelReady = isModelCached(settings.activeModelId);
+
+  const downloadModel = async () => {
+    setDownloadingModel(true);
+    // preloadModel returns true on success, false on failure (no throw).
+    const ok = await preloadModel(settings.activeModelId);
+    setDownloadingModel(false);
+    if (ok) {
+      toast({ title: "Model downloaded", description: "You can now capture and try on." });
+    } else {
+      toast({
+        title: "Download failed",
+        description: "Could not download the model. Check your network connection and try again.",
+        variant: "destructive",
+      });
+    }
+    return ok;
+  };
+
+  /** Checks if the model is ready. If not, returns false (the inline banner
+   *  is already visible — no separate popup needed). */
+  const ensureModelReady = (): boolean => {
+    return modelReady;
+  };
 
   // Defensive: ensure products is always an array before .find
   const safeProducts = Array.isArray(products) ? products : [];
@@ -98,6 +133,13 @@ export function TryOnCameraPage() {
   }, [phase, showCaptures]);
 
   // ─── Capture flow ─────────────────────────────────────────────────────
+  // Gate: the model must be downloaded before the user can open the camera.
+  // If not, the "Download model first" popup appears.
+  const openCamera = () => {
+    if (!ensureModelReady()) return;
+    setPhase("camera");
+  };
+
   const startCountdown = () => {
     setPhase("countdown");
     setCountdown(settings.captureTimerSeconds);
@@ -139,6 +181,8 @@ export function TryOnCameraPage() {
     setPhase("intro");
   };
 
+  // Save the captured image to the gallery + immediately start the try-on
+  // pipeline. The validation (stages 1+2+3) runs during processing.
   const saveAndTryOn = () => {
     if (!lastCapture) return;
     const saved: SavedCaptureImage = {
@@ -151,6 +195,8 @@ export function TryOnCameraPage() {
     };
     addSavedImage(saved);
     setActiveCapture(saved.id);
+    // Don't skip stages — the camera-captured image needs full validation.
+    sessionStorage.removeItem("nova_skip_stages");
     navigate("/tryon/processing");
   };
 
@@ -256,8 +302,25 @@ export function TryOnCameraPage() {
                 <div className="text-center max-w-md">
                   <h2 className="font-display text-3xl">Ready to try it on?</h2>
                   <p className="text-sm text-primary-foreground/70 mt-3">3-second countdown, then posture check, compression, and AI render.</p>
+                  {/* Model status indicator in the intro phase */}
+                  {!modelReady && (
+                    <div className="mt-4 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2.5 text-xs text-accent-foreground flex items-center justify-between gap-3">
+                      <div className="text-left">
+                        <p className="font-medium text-accent">Model not downloaded</p>
+                        <p className="text-[11px] text-muted-foreground mt-0.5">{activeModel?.name} ({activeModel?.sizeMb} MB) — required for pose validation</p>
+                      </div>
+                      <button
+                        onClick={downloadModel}
+                        disabled={downloadingModel}
+                        className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-xs font-medium disabled:opacity-50"
+                      >
+                        {downloadingModel ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                        {downloadingModel ? `${Math.round(modelProgress * 100)}%` : "Download"}
+                      </button>
+                    </div>
+                  )}
                   {cameraError && <p className="mt-4 text-xs bg-destructive/15 text-destructive px-3 py-2 rounded">{cameraError}</p>}
-                  <button onClick={() => setPhase("camera")} className="mt-6 px-8 h-14 rounded-xl bg-primary text-primary-foreground font-medium">
+                  <button onClick={openCamera} className="mt-6 px-8 h-14 rounded-xl bg-primary text-primary-foreground font-medium">
                     Open camera
                   </button>
                 </div>
@@ -457,6 +520,12 @@ export function TryOnCameraPage() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* The inline "model not downloaded" banner in the intro phase is the
+          single UI for model download status. It hides automatically when
+          `modelReady` becomes true (single-source-of-truth via the global
+          `loadedModels` set + pub/sub in usePoseDetection). No separate
+          popup needed. */}
     </div>
   );
 }

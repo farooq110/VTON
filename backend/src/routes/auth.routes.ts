@@ -33,7 +33,7 @@ router.post(
     setAuthCookie(res, result.token);
     res.status(200).json({
       success: true,
-      data: { user: result.user },
+      data: { token: result.token, user: result.user },
       message: 'Signed in',
     });
   }),

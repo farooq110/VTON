@@ -13,8 +13,12 @@ import { ROLE_LABELS } from "@/types";
  *
  * The user enters EITHER an email address OR a franchise name, plus a password.
  * The backend's /auth/signin endpoint auto-detects which one was supplied and
- * returns `{ token, user }` on success. There is no passcode step — the user
- * is redirected straight to /home.
+ * returns `{ token, user }` on success. The user is then redirected straight
+ * to /home.
+ *
+ * Route guards in App.tsx enforce:
+ *   - Unauthed users are blocked from /private routes (redirected to /signin).
+ *   - Authed users are blocked from /auth routes (redirected to /home).
  */
 export function SignInPage() {
   const { signIn } = useAuth();

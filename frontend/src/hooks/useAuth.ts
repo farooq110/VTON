@@ -2,6 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import apiClient from "@/lib/api-client";
 import { useAuthStore } from "@/lib/store";
+import { logger } from "@/lib/logger";
 import type { User } from "@/types";
 
 /**
@@ -9,12 +10,31 @@ import type { User } from "@/types";
  *
  * The client sends `{ identifier, password }` where `identifier` is either an
  * email address (e.g. "admin@atelier.nova") OR a franchise/user name (e.g.
- * "Atelier Nova NYC"). On success the server returns `{ token, user }` and the
- * user is redirected straight to /home. There is no passcode step.
+ * "Atelier Nova NYC"). On success the server returns the standard envelope:
+ *
+ *   { success: true, data: { token, user }, message: "Signed in" }
+ *
+ * We unwrap `data.data` to get the `{ token, user }` payload, store the token
+ * in localStorage (for the api-client's Authorization header), set the user
+ * in the Zustand store (which flips `isAuthed` to true), then navigate to
+ * /home.
+ *
+ * **Loose coupling:** the hook doesn't know HOW the server validates
+ * credentials — it only posts to the endpoint and stores the result.
+ *
+ * **Diagnostic Logging:** sign-in attempts (success + failure) are logged via
+ * the global `logger` utility (gated by `settings.debugLogging`).
  */
-interface SignInResponse {
+interface SignInPayload {
   token: string;
   user: User;
+}
+
+/** Backend envelope shape — every API response follows this. */
+interface Envelope<T> {
+  success: boolean;
+  data: T;
+  message?: string;
 }
 
 export function useAuth() {
@@ -23,13 +43,32 @@ export function useAuth() {
 
   const signIn = useMutation({
     mutationFn: async ({ identifier, password }: { identifier: string; password: string }) => {
-      const { data } = await apiClient.post<SignInResponse>("/auth/signin", { identifier, password });
-      return data;
+      logger.auth("Sign-in attempt", { detail: `identifier: ${identifier}` });
+      const { data } = await apiClient.post<Envelope<SignInPayload>>(
+        "/auth/signin",
+        { identifier, password },
+      );
+      // Defensive unwrap — tolerate both envelope shape AND bare payload
+      // (so a future backend change doesn't silently break login).
+      const payload: SignInPayload = (data as any)?.data ?? data;
+      if (!payload?.token || !payload?.user) {
+        throw new Error("Sign-in response was missing token or user.");
+      }
+      return payload;
     },
-    onSuccess: (data) => {
-      localStorage.setItem("nova_token", data.token);
-      setUser(data.user);
-      navigate("/home");
+    onSuccess: (payload) => {
+      localStorage.setItem("nova_token", payload.token);
+      setUser(payload.user);
+      logger.auth("Sign-in succeeded", { detail: `user: ${payload.user.email} · role: ${payload.user.role}` });
+      // Defer the navigate to the next tick so the Zustand state update
+      // (isAuthed = true) flushes before the route guard re-evaluates.
+      // Without this, the route guard may still see isAuthed=false and
+      // bounce the user back to /signin.
+      setTimeout(() => navigate("/home", { replace: true }), 0);
+    },
+    onError: (err: any) => {
+      const msg = err.response?.data?.message ?? err.message ?? "Unknown error";
+      logger.auth("Sign-in failed", { detail: msg, level: "error" });
     },
   });
 

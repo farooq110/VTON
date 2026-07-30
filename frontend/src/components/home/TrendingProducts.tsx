@@ -99,9 +99,11 @@ export function TrendingProducts({ className = "" }: { className?: string }) {
   };
 
   return (
-    <div className={`flex flex-col min-h-0 ${className}`}>
-      {/* Header — sticky so it stays visible while the list scrolls */}
-      <div className="flex items-center justify-between px-3 sm:px-6 lg:px-10 py-3 shrink-0 border-b border-border/40">
+    <div className={`flex flex-col ${className}`}>
+      {/* Header — sticky to the top of the viewport (under the main header)
+          so it stays visible while the page scrolls. z-30 to sit above the
+          product grid but below the main header (z-40) + menu overlay (z-50). */}
+      <div className="sticky top-[64px] sm:top-[72px] lg:top-[80px] z-30 flex items-center justify-between px-3 sm:px-6 lg:px-10 py-3 shrink-0 border-b border-border/40 bg-background/95 backdrop-blur-md">
         <div className="flex items-center gap-2">
           <Flame className="h-5 w-5 text-accent" />
           <h2 className="font-display text-lg sm:text-xl font-medium">Trending now</h2>
@@ -114,8 +116,8 @@ export function TrendingProducts({ className = "" }: { className?: string }) {
         </p>
       </div>
 
-      {/* Scrollable grid — infinite, cycles through the catalog */}
-      <div className="flex-1 min-h-0 lg:overflow-y-auto scrollbar-boutique px-3 sm:px-6 lg:px-10 py-4">
+      {/* Grid — the whole page scrolls naturally; no internal scroll container. */}
+      <div className="px-3 sm:px-6 lg:px-10 py-4">
         {trending.length === 0 ? (
           /* Beautiful empty state — shown when no trending products are available */
           <div className="flex flex-col items-center justify-center py-16 sm:py-24 text-center px-4 max-w-md mx-auto">

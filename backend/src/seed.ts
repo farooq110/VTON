@@ -2,13 +2,19 @@ import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { encryptApiKey, generateApiKey } from './lib/crypto';
 import { logger } from './lib/logger';
+import { seedDummyProductsIfEmpty } from './services/product.service';
 
 /**
  * Seed script.
  *
  * Creates:
- *   1. An admin user (admin@admin-portal.local / admin12345)
- *   2. 5 demo customers, each with:
+ *   1. A portal admin user (admin@admin-portal.local / admin12345)
+ *   2. 4 boutique demo admins (the "tap to fill" rows on the boutique
+ *      SignInPage — super_admin / developer / manager / public_user). These
+ *      MUST match the credentials shown in
+ *      `frontend/src/pages/SignInPage.tsx` or the demo buttons won't work.
+ *   3. Default brand (Atelier Nova) + 8 dummy products
+ *   4. 5 demo customers, each with:
  *        - 2 franchises
  *        - 1 active API key
  *        - 3 pricing tiers
@@ -25,10 +31,35 @@ function log(msg: string, extra?: Record<string, unknown>): void {
   console.log(`🌱 ${msg}`, extra ?? '');
 }
 
+/**
+ * Boutique demo admins — these are the 4 "tap to fill" rows shown on the
+ * boutique frontend's SignInPage (`frontend/src/pages/SignInPage.tsx`).
+ *
+ * Keep this list IN SYNC with the `DemoRow` entries on the sign-in page.
+ * If you change a credential here, change it there too (and vice-versa).
+ *
+ * Roles:
+ *   - super_admin → can access Settings + edit brand + edit features
+ *   - developer   → can access Settings + edit features (models, thresholds)
+ *   - manager     → can access Settings + edit brand (cover, name, logo)
+ *   - public_user → kiosk user, no Settings access, no Sign out button
+ */
+const BOUTIQUE_DEMO_ADMINS: Array<{
+  email: string;
+  name: string;
+  password: string;
+  role: string;
+}> = [
+  { email: 'admin@atelier.nova',       name: 'Atelier Super Admin', password: 'admin123',   role: 'super_admin' },
+  { email: 'developer@atelier.nova',   name: 'Atelier Developer',   password: 'dev123',     role: 'developer'   },
+  { email: 'nyc.manager@atelier.nova', name: 'NYC Franchise Manager', password: 'manager123', role: 'manager'   },
+  { email: 'nyc.user@atelier.nova',    name: 'NYC Public User',     password: 'user123',    role: 'public_user' },
+];
+
 async function main(): Promise<void> {
   log('Seeding database…');
 
-  // --- Admin -------------------------------------------------------------
+  // --- Portal admin (admin-portal.local) ---------------------------------
   const passwordHash = await bcrypt.hash('admin12345', 12);
   const admin = await prisma.admin.upsert({
     where: { email: 'admin@admin-portal.local' },
@@ -41,6 +72,45 @@ async function main(): Promise<void> {
     },
   });
   log('Admin user ready', { id: admin.id, email: admin.email });
+
+  // --- Boutique demo admins (the "tap to fill" rows on SignInPage) -------
+  // These credentials are shown verbatim on the boutique frontend's sign-in
+  // page. They must exist in the DB or the demo buttons will fail with 401.
+  for (const demo of BOUTIQUE_DEMO_ADMINS) {
+    const hash = await bcrypt.hash(demo.password, 12);
+    const row = await prisma.admin.upsert({
+      where: { email: demo.email },
+      update: { passwordHash: hash, role: demo.role, name: demo.name },
+      create: {
+        email: demo.email,
+        name: demo.name,
+        passwordHash: hash,
+        role: demo.role,
+      },
+    });
+    log(`Boutique demo admin ready`, { email: row.email, role: row.role });
+  }
+
+  // --- Brand (storefront identity for the boutique frontend) -------------
+  const existingBrand = await prisma.brand.findFirst({ where: { isActive: true } });
+  if (!existingBrand) {
+    await prisma.brand.create({
+      data: {
+        name: 'Atelier Nova',
+        tagline: 'Try then Buy',
+        primaryColor: '#1c1917',
+        accentColor: '#d4a017',
+        isActive: true,
+      },
+    });
+    log('Brand seeded (Atelier Nova)');
+  } else {
+    log('Brand already exists, skipping seed');
+  }
+
+  // --- Products (dummy catalog so the boutique UI isn't empty) ----------
+  await seedDummyProductsIfEmpty();
+  log('Products seeded (if empty)');
 
   // --- Demo customers ----------------------------------------------------
   const demoData: Array<{
@@ -248,15 +318,41 @@ async function main(): Promise<void> {
       },
     });
 
-    // 1 invoice for last month (DRAFT)
+    // 1 invoice for last month (DRAFT) — upsert so re-running the seed
+    // doesn't crash on the unique `invoiceNumber` constraint. Idempotent.
     const periodStart = new Date(now.getUTCFullYear(), now.getUTCMonth() - 1, 1);
     const periodEnd = new Date(now.getUTCFullYear(), now.getUTCMonth(), 0, 23, 59, 59);
     const totalCredits = usageRecords.reduce((s, r) => s + r.creditsUsed, 0);
     const invoiceNumber = `INV-${periodStart.getUTCFullYear()}${String(
       periodStart.getUTCMonth() + 1,
     ).padStart(2, '0')}-${String(customerIndex).padStart(4, '0')}`;
-    await prisma.invoice.create({
-      data: {
+    await prisma.invoice.upsert({
+      where: { invoiceNumber },
+      update: {
+        // On re-run, refresh the totals so the invoice reflects the latest
+        // seeded usage records.
+        totalCredits,
+        lineItems: JSON.stringify([
+          {
+            type: 'flat',
+            tierLabel: 'Starter',
+            startRange: 1,
+            endRange: 100,
+            credits: totalCredits,
+            priceCents: 4900,
+            priceFormatted: '$49.00',
+          },
+        ]),
+        totals: JSON.stringify({
+          subtotalCents: 4900,
+          currency: 'USD',
+          currencyCode: 'USD',
+          totalFormatted: '$49.00',
+          requestCount: usageRecords.length,
+          totalCredits,
+        }),
+      },
+      create: {
         customerId: customer.id,
         invoiceNumber,
         status: 'DRAFT',

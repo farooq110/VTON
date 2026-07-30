@@ -16,8 +16,106 @@ model Admin {
   role         String    @default("ADMIN")
   resetToken   String?
   resetExpires DateTime?
+  /// 6-digit email passcode (plain text — short-lived, 10 min TTL).
+  /// Used by the 2-step sign-in flow: send passcode → user types it → verify.
+  passcode         String?
+  passcodeExpires  DateTime?
+  passcodeAttempts Int      @default(0)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
+}
+
+/// Boutique storefront identity — read by the frontend's HomePage to render
+/// the cover banner, brand logo, brand name, and tagline ("Try then Buy").
+/// One row per brand; the admin portal edits it via the Brand API.
+model Brand {
+  id                   String   @id @default(cuid()) @map("_id")
+  name                 String
+  tagline              String   @default("Try then Buy")
+  logoUrl              String?
+  coverBannerUrl       String?
+  customName           String?
+  customLogoUrl        String?
+  customCoverBannerUrl String?
+  primaryColor         String?  @default("#1c1917")
+  accentColor          String?  @default("#d4a017")
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+/// Garment catalog — read by the frontend's ProductsPage, TrendingProducts
+/// rail, ProductDetailPage, and TRY ON flow. `trendingScore` (0–100) drives
+/// the home rail ordering; `garmentOverlayUrl` is the reference image passed
+/// to the TryOn AI API.
+model Product {
+  id                String   @id @default(cuid()) @map("_id")
+  sku               String   @unique
+  code              String?
+  name              String
+  description       String?
+  price             Float    @default(0)
+  currency          String   @default("USD")
+  category          String?
+  imageUrl          String?
+  garmentOverlayUrl String?
+  /// Stored as a JSON string of string[] to keep the schema provider-agnostic
+  /// (works on both MongoDB and SQL providers).
+  sizes             String   @default("[]")
+  /// Stored as a JSON string of {name, hex}[].
+  colors            String   @default("[]")
+  isNew             Boolean  @default(false)
+  inStock           Boolean  @default(true)
+  trendingScore     Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([category])
+  @@index([isNew])
+  @@index([inStock])
+  @@index([trendingScore])
+}
+
+/// Per-brand + per-franchise try-on request log. Written by the
+/// `/api/tryon/track` endpoint (called fire-and-forget by the frontend's
+/// orchestrator after every TryOn AI call). Drives the admin portal's
+/// "brand request count" dashboard.
+model TryOnLog {
+  id          String   @id @default(cuid()) @map("_id")
+  brandId     String
+  franchiseId String
+  userId      String
+  productSku  String
+  status      String   @default("success")
+  durationMs  Int?
+  timestamp   DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([brandId, timestamp])
+  @@index([franchiseId, timestamp])
+  @@index([userId])
+  @@index([productSku])
+}
+
+/// Client-side diagnostic logs — POSTed by the frontend's `logger` utility
+/// (fire-and-forget, only when `settings.telemetryEnabled` is true). Gives
+/// the backend visibility into client-side failures (camera permission
+/// denials, model load failures, network errors) that are invisible
+/// server-side.
+model TelemetryLog {
+  id        String   @id @default(cuid()) @map("_id")
+  level     String   @default("info")
+  category  String
+  message   String
+  detail    String?
+  userAgent String?
+  url       String?
+  timestamp DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([level, timestamp])
+  @@index([category, timestamp])
+  @@index([timestamp])
 }
 
 model Customer {

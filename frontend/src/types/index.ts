@@ -179,10 +179,10 @@ export interface TryOnSettings {
   compression: ImageCompressionSettings;
   captureTimerSeconds: number;
   taglineRefreshMs: number;
-  tryOnApiEndpoint: string;
-  tryOnApiKey: string;
   productTapBehavior: "navigate" | "expand" | "modal";
   debugLogging: boolean;
+  /** When true, error-level logs are POSTed to /api/telemetry (fire-and-forget). */
+  telemetryEnabled: boolean;
   autoPreloadModel: boolean;
   theme: ThemeSettings;
 }

@@ -22,13 +22,34 @@ export interface AuthResult {
     email: string;
     name: string;
     role: string;
+    /** Active brand id — derived from the Brand table. Used by the frontend
+     *  orchestrator to attribute try-on requests to the right brand. */
+    brandId: string;
+    /** Franchise id — admins aren't tied to a specific franchise in the
+     *  schema, so we synthesize a stable id from the admin id. The frontend
+     *  uses this for the `/tryon/track` payload (falls back to "unknown"). */
+    franchiseId: string;
   };
 }
 
 export async function login(input: SigninInput): Promise<AuthResult> {
-  const admin = await prisma.admin.findUnique({
-    where: { email: input.email.toLowerCase() },
+  // Normalize: prefer `email` if provided, otherwise treat `identifier` as
+  // an email-or-name. We first try an exact email match, then fall back to a
+  // case-insensitive name lookup so franchise-name login also works.
+  const rawId = (input.email ?? input.identifier ?? '').trim();
+  const lower = rawId.toLowerCase();
+
+  let admin = await prisma.admin.findUnique({
+    where: { email: lower },
   });
+
+  if (!admin && input.identifier) {
+    // Fall back to a case-insensitive name match (franchise-name login).
+    admin = await prisma.admin.findFirst({
+      where: { name: { contains: input.identifier, mode: 'insensitive' } },
+    });
+  }
+
   if (!admin) {
     throw new Error('UNAUTHORIZED: Invalid email or password');
   }
@@ -44,6 +65,21 @@ export async function login(input: SigninInput): Promise<AuthResult> {
     role: admin.role,
   });
 
+  // Derive brandId from the active Brand row (seed guarantees one exists).
+  // If no brand exists yet, fall back to a stable synthetic id so the
+  // frontend's User type is always satisfied.
+  let brandId = `brand_${admin.id}`;
+  try {
+    const brand = await prisma.brand.findFirst({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    if (brand) brandId = brand.id;
+  } catch {
+    // Best-effort — keep the synthetic fallback.
+  }
+
   svcLogger.info({ adminId: admin.id, email: admin.email }, 'admin signed in');
 
   return {
@@ -53,6 +89,11 @@ export async function login(input: SigninInput): Promise<AuthResult> {
       email: admin.email,
       name: admin.name,
       role: admin.role,
+      brandId,
+      // Synthesize a stable franchise id from the admin id — admins aren't
+      // tied to a specific franchise in the schema. The frontend uses this
+      // only for the /tryon/track payload (best-effort attribution).
+      franchiseId: `franchise_${admin.id}`,
     },
   };
 }

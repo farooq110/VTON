@@ -19,6 +19,10 @@ import invoiceRoutes from './routes/invoices.routes';
 import vtonRoutes from './routes/vton.routes';
 import notificationRoutes from './routes/notifications.routes';
 import activityRoutes from './routes/activity.routes';
+import brandRoutes from './routes/brand.routes';
+import productRoutes from './routes/product.routes';
+import tryonTrackRoutes from './routes/tryon-track.routes';
+import telemetryRoutes from './routes/telemetry.routes';
 
 export function createApp(): Express {
   const app = express();
@@ -51,12 +55,19 @@ export function createApp(): Express {
 
   // --- API routes (all mounted under /api) ---
   app.use('/api/auth', authRoutes);
+  app.use('/api/brand', brandRoutes);
+  app.use('/api/products', productRoutes);
   app.use('/api/customers', customersRoutes);
   app.use('/api/franchises', franchisesRoutes);
   app.use('/api/usage', usageRoutes);
   app.use('/api/pricing', pricingRoutes);
   app.use('/api/invoices', invoiceRoutes);
   app.use('/api/vton', vtonRoutes);
+  // TryOn tracking lives under /api/tryon/* (separate from /api/vton/* which
+  // is the FASHN.ai submission API). The frontend's orchestrator posts to
+  // `/tryon/track` — mounted here.
+  app.use('/api/tryon', tryonTrackRoutes);
+  app.use('/api/telemetry', telemetryRoutes);
   app.use('/api/notifications', notificationRoutes);
   app.use('/api/activity', activityRoutes);
 

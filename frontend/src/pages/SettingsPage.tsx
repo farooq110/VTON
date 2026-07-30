@@ -1,26 +1,78 @@
-import { useNavigate } from "react-router-dom";
-import { AlertCircle, Palette, RotateCcw, Save, Scan, Shield, Target, Image as ImageIcon } from "lucide-react";
+import { AlertCircle, CheckCircle2, Download, Loader2, Palette, RotateCcw, Save, Scan, Shield, Target, Image as ImageIcon } from "lucide-react";
+import { useRef, useState } from "react";
 import { useAuthStore } from "@/lib/store";
 import { DETECTION_MODELS } from "@/lib/constants";
 import { canManageBrand, canManageFeatures, ROLE_LABELS } from "@/types";
-import type { DetectionModelId, ImageCompressionSettings, PoseThresholds } from "@/types";
+import type { DetectionModel, DetectionModelId, ImageCompressionSettings, PoseThresholds, TryOnSettings } from "@/types";
+import { usePoseDetection } from "@/hooks/usePoseDetection";
+import { logger } from "@/lib/logger";
+import { useToast } from "@/components/ui/toast";
 import { GlobalHeader } from "@/components/layout/GlobalHeader";
 import { BrandSection } from "@/components/settings/BrandSection";
 import { ThemeSection } from "@/components/settings/ThemeSection";
 import { Button } from "@/components/ui/button";
 
+/**
+ * SettingsPage — control panel for brand identity, detection models, posture
+ * thresholds, image compression, capture timer, and debug/telemetry.
+ *
+ * **Save button behavior:**
+ *   - The Save button is DISABLED by default.
+ *   - It becomes ENABLED only when the user changes a setting (dirty state).
+ *   - On save click: shows a toast, marks the settings as saved, and DISABLES
+ *     the button again. Does NOT navigate away from the page.
+ *
+ * **Model download behavior:**
+ *   - Models do NOT auto-download. The user must click "Download now" manually.
+ *   - After download, the button shows "Downloaded" (disabled, green check).
+ *   - If the user tries to capture/upload without the model downloaded, a
+ *     beautiful popup appears: "Download the model first".
+ *
+ * **TryOn AI endpoint:**
+ *   - Removed from the UI — the backend proxy `/api/tryon/run` handles the
+ *     AI call with server-side credentials. No API keys on the client.
+ */
 export function SettingsPage() {
-  const navigate = useNavigate();
   const { settings, updateSettings, resetSettings, user } = useAuthStore();
   const userRole = user?.role;
+  const { toast } = useToast();
 
   const canBrand = canManageBrand(userRole);
   const canFeatures = canManageFeatures(userRole);
 
+  // ─── Dirty-state tracking for the Save button ──────────────────────────
+  // Snapshot the settings when the page loads. Compare current settings to
+  // the snapshot to determine if there are unsaved changes.
+  const savedSnapshotRef = useRef<TryOnSettings>(structuredClone(settings));
+  const [saved, setSaved] = useState(true);
+
+  const isDirty = () => JSON.stringify(settings) !== JSON.stringify(savedSnapshotRef.current);
+
+  const handleUpdate = (patch: Partial<TryOnSettings>) => {
+    updateSettings(patch);
+    setSaved(false);
+  };
+
+  const handleReset = () => {
+    resetSettings();
+    // After reset, the settings differ from the snapshot → dirty
+    setTimeout(() => setSaved(false), 0);
+  };
+
+  const handleSave = () => {
+    // Zustand-persist already wrote to localStorage on every updateSettings
+    // call. This button is just a UX confirmation — update the snapshot and
+    // show a toast.
+    savedSnapshotRef.current = structuredClone(useAuthStore.getState().settings);
+    setSaved(true);
+    logger.settings("Settings saved");
+    toast({ title: "Settings saved", description: "Your changes have been applied." });
+  };
+
   const setThresholds = (patch: Partial<PoseThresholds>) =>
-    updateSettings({ poseThresholds: { ...settings.poseThresholds, ...patch } });
+    handleUpdate({ poseThresholds: { ...settings.poseThresholds, ...patch } });
   const setCompression = (patch: Partial<ImageCompressionSettings>) =>
-    updateSettings({ compression: { ...settings.compression, ...patch } });
+    handleUpdate({ compression: { ...settings.compression, ...patch } });
 
   const roleLabel = userRole ? ROLE_LABELS[userRole] : "";
   const subtitle = canBrand && canFeatures
@@ -31,6 +83,8 @@ export function SettingsPage() {
         ? `Feature settings · ${roleLabel}`
         : "View only";
 
+  const dirty = !saved && isDirty();
+
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <GlobalHeader
@@ -40,12 +94,17 @@ export function SettingsPage() {
         rightSlot={
           <>
             {canFeatures && (
-              <Button variant="outline" size="sm" onClick={() => { resetSettings(); }} className="gap-2">
+              <Button variant="outline" size="sm" onClick={handleReset} className="gap-2">
                 <RotateCcw className="h-4 w-4" /> Reset
               </Button>
             )}
-            <Button size="sm" onClick={() => navigate("/home")} className="gap-2">
-              <Save className="h-4 w-4" /> Save
+            <Button
+              size="sm"
+              onClick={handleSave}
+              disabled={!dirty}
+              className="gap-2"
+            >
+              <Save className="h-4 w-4" /> {dirty ? "Save" : "Saved"}
             </Button>
           </>
         }
@@ -93,24 +152,16 @@ export function SettingsPage() {
                 <h2 className="font-display text-lg">Detection model</h2>
               </div>
               <p className="text-sm text-muted-foreground mb-4 leading-relaxed">
-                Choose the AI model that detects the person and checks their pose. The recommended option (YOLOv8n) is fastest and works well on tablets and kiosks.
+                Choose the AI model that detects the person and checks their pose. Models are <strong>not</strong> auto-downloaded — click &quot;Download now&quot; to fetch the model weights (one-time, ~3–12 MB). After download, the status badge shows &quot;Downloaded&quot;.
               </p>
               <div className="space-y-2">
                 {DETECTION_MODELS.map((m) => (
-                  <button
+                  <ModelOption
                     key={m.id}
-                    onClick={() => updateSettings({ activeModelId: m.id as DetectionModelId })}
-                    className={`w-full text-left rounded-xl border p-4 ${settings.activeModelId === m.id ? "border-primary bg-primary/5" : "border-border"}`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <p className="font-display text-sm font-medium">{m.name} {m.recommended && <span className="text-accent text-[10px]">Recommended</span>}</p>
-                        <p className="text-xs text-muted-foreground mt-1">{m.description}</p>
-                        <p className="text-[11px] text-muted-foreground mt-2 font-mono">{m.sizeMb} MB · ~{m.speedMs}ms · {m.accuracy}</p>
-                      </div>
-                      <div className={`h-5 w-5 rounded-full border-2 ${settings.activeModelId === m.id ? "border-primary bg-primary" : "border-border"}`} />
-                    </div>
-                  </button>
+                    model={m}
+                    isActive={settings.activeModelId === m.id}
+                    onSelect={() => handleUpdate({ activeModelId: m.id as DetectionModelId })}
+                  />
                 ))}
               </div>
             </section>
@@ -160,57 +211,45 @@ export function SettingsPage() {
             </section>
           )}
 
-          {/* Capture & AI */}
+          {/* Capture (no AI endpoint — handled by backend) */}
           {canFeatures && (
             <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
               <div>
-                <h2 className="font-display text-lg">Capture &amp; AI</h2>
+                <h2 className="font-display text-lg">Capture</h2>
                 <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Set the countdown timer before the camera captures, how fast taglines rotate, and connect your TryOn AI provider.
-                  </p>
+                  Set the countdown timer before the camera captures and how fast taglines rotate during AI processing. The TryOn AI endpoint is configured server-side — no API keys needed on the client.
+                </p>
               </div>
-              <NumberField label="Capture timer (s)" value={settings.captureTimerSeconds} step={1} min={1} max={10} onChange={(v) => updateSettings({ captureTimerSeconds: v })} />
-              <NumberField label="Tagline refresh (s)" value={settings.taglineRefreshMs / 1000} step={0.5} min={1} max={8} onChange={(v) => updateSettings({ taglineRefreshMs: v * 1000 })} />
-              <div>
-                <label className="text-xs uppercase tracking-wider text-muted-foreground">TryOn AI endpoint</label>
-                <input
-                  value={settings.tryOnApiEndpoint}
-                  onChange={(e) => updateSettings({ tryOnApiEndpoint: e.target.value })}
-                  className="w-full h-10 mt-1 px-3 rounded-lg border border-border font-mono text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-xs uppercase tracking-wider text-muted-foreground">API key</label>
-                <input
-                  type="password"
-                  value={settings.tryOnApiKey}
-                  onChange={(e) => updateSettings({ tryOnApiKey: e.target.value })}
-                  placeholder="sk-…"
-                  className="w-full h-10 mt-1 px-3 rounded-lg border border-border font-mono text-xs"
-                />
-              </div>
+              <NumberField label="Capture timer (s)" value={settings.captureTimerSeconds} step={1} min={1} max={10} onChange={(v) => handleUpdate({ captureTimerSeconds: v })} />
+              <NumberField label="Tagline refresh (s)" value={settings.taglineRefreshMs / 1000} step={0.5} min={1} max={8} onChange={(v) => handleUpdate({ taglineRefreshMs: v * 1000 })} />
             </section>
           )}
 
-          {/* Debug */}
+          {/* Debug & Telemetry */}
           {canFeatures && (
             <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
               <div className="flex items-center gap-2">
                 <Shield className="h-5 w-5 text-accent" />
                 <div>
-                  <h2 className="font-display text-lg">Debug &amp; activity log</h2>
+                  <h2 className="font-display text-lg">Debug &amp; telemetry</h2>
                   <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Turn on detailed event logging (camera, capture, try-on, network) for troubleshooting. Only visible to managers and developers — not shown to public users.
+                    Turn on detailed event logging (camera, capture, try-on, network) for troubleshooting. Only visible to managers and developers — not shown to public users. Error-level logs can also be sent to the backend for remote diagnostics.
                   </p>
                 </div>
               </div>
               <label className="flex items-center justify-between">
-                <span className="text-sm">Enable debug logging</span>
-                <input type="checkbox" checked={settings.debugLogging} onChange={(e) => updateSettings({ debugLogging: e.target.checked })} />
+                <div>
+                  <span className="text-sm font-medium">Enable debug logging</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Shows the Activity overlay (bottom-right). Logs camera, capture, try-on, and network events.</p>
+                </div>
+                <input type="checkbox" checked={settings.debugLogging} onChange={(e) => handleUpdate({ debugLogging: e.target.checked })} />
               </label>
               <label className="flex items-center justify-between">
-                <span className="text-sm">Auto-preload model on start</span>
-                <input type="checkbox" checked={settings.autoPreloadModel} onChange={(e) => updateSettings({ autoPreloadModel: e.target.checked })} />
+                <div>
+                  <span className="text-sm font-medium">Send error telemetry to backend</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">When ON, error-level logs are POSTed to <code className="font-mono text-[10px]">/api/telemetry</code> (fire-and-forget) so the server can track client-side failures.</p>
+                </div>
+                <input type="checkbox" checked={settings.telemetryEnabled} onChange={(e) => handleUpdate({ telemetryEnabled: e.target.checked })} />
               </label>
             </section>
           )}
@@ -261,6 +300,115 @@ function NumberField({ label, value, step, min, max, onChange }: { label: string
         onChange={(e) => onChange(Number(e.target.value))}
         className="w-full h-10 mt-1 px-3 rounded-lg border border-border"
       />
+    </div>
+  );
+}
+
+/**
+ * ModelOption — a single detection model card with download status.
+ *
+ * Download behavior:
+ *   - Models do NOT auto-download. User must click "Download now".
+ *   - After successful download, shows "Downloaded" badge (green, disabled button).
+ *   - If download fails, shows an error badge + retries on next click.
+ *   - Download progress bar appears during active download.
+ */
+function ModelOption({
+  model,
+  isActive,
+  onSelect,
+}: {
+  model: DetectionModel;
+  isActive: boolean;
+  onSelect: () => void;
+}) {
+  const { isModelCached, preloadModel, modelStatus, modelProgress, activeModelId } = usePoseDetection();
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const cached = isModelCached(model.id);
+  const isThisDownloading = downloading || (activeModelId === model.id && modelStatus === "loading");
+
+  const handleDownload = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDownloading(true);
+    setDownloadError(null);
+    logger.settings(`Downloading model: ${model.id}`);
+    // preloadModel returns true on success, false on failure (no throw).
+    const ok = await preloadModel(model.id);
+    setDownloading(false);
+    if (ok) {
+      logger.settings(`Model downloaded successfully: ${model.id}`);
+    } else {
+      const msg = "Download failed — check your network connection and try again.";
+      setDownloadError(msg);
+      logger.settings(`Model download failed: ${model.id}`, { detail: msg, level: "error" });
+    }
+  };
+
+  return (
+    <div
+      className={`w-full text-left rounded-xl border p-4 transition ${isActive ? "border-primary bg-primary/5" : "border-border hover:border-border/80"}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={onSelect} className="font-display text-sm font-medium text-left">
+              {model.name}
+            </button>
+            {model.recommended && (
+              <span className="text-accent text-[10px] uppercase tracking-wider bg-accent/10 px-1.5 py-0.5 rounded">Recommended</span>
+            )}
+            {/* Download status badge */}
+            {cached ? (
+              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-green-600 bg-green-500/10 px-1.5 py-0.5 rounded">
+                <CheckCircle2 className="h-3 w-3" /> Downloaded
+              </span>
+            ) : isThisDownloading ? (
+              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-blue-600 bg-blue-500/10 px-1.5 py-0.5 rounded">
+                <Loader2 className="h-3 w-3 animate-spin" /> Downloading {Math.round(modelProgress * 100)}%
+              </span>
+            ) : downloadError ? (
+              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-red-600 bg-red-500/10 px-1.5 py-0.5 rounded">
+                Download failed
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                <Download className="h-3 w-3" /> Not downloaded ({model.sizeMb} MB)
+              </span>
+            )}
+            {/* Active selection radio */}
+            <button
+              onClick={onSelect}
+              className={`h-5 w-5 rounded-full border-2 shrink-0 ${isActive ? "border-primary bg-primary" : "border-border"}`}
+              aria-label="Select model"
+            />
+          </div>
+          <p className="text-xs text-muted-foreground mt-1">{model.description}</p>
+          <p className="text-[11px] text-muted-foreground mt-2 font-mono">~{model.speedMs}ms inference · {model.accuracy} accuracy</p>
+
+          {/* Download progress bar */}
+          {isThisDownloading && (
+            <div className="mt-2 h-1.5 rounded-full bg-muted overflow-hidden">
+              <div className="h-full bg-blue-500 transition-all" style={{ width: `${Math.round(modelProgress * 100)}%` }} />
+            </div>
+          )}
+
+          {/* Download error message */}
+          {downloadError && !isThisDownloading && (
+            <p className="mt-2 text-[11px] text-red-600 leading-relaxed">{downloadError}</p>
+          )}
+
+          {/* Download button — only show if not downloaded and not currently downloading */}
+          {!cached && !isThisDownloading && (
+            <button
+              onClick={handleDownload}
+              className="mt-3 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-700 font-medium px-3 py-1.5 rounded-lg border border-blue-200 hover:bg-blue-50 transition"
+            >
+              <Download className="h-3.5 w-3.5" /> Download now ({model.sizeMb} MB)
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

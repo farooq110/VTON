@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowRight,
+  ArrowUp,
   Camera as CameraIcon,
   Home as HomeIcon,
   Image as ImageIcon,
@@ -78,7 +79,20 @@ export function HomePage() {
 
   // Slide-down menu — visible on ALL screen sizes on the home page.
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showScrollTop, setShowScrollTop] = useState(false);
   const { toast } = useToast();
+
+  // Show the scroll-to-top button when the user has scrolled down more than
+  // 400px. Hides when near the top so it doesn't cover content.
+  useEffect(() => {
+    const onScroll = () => setShowScrollTop(window.scrollY > 400);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+  };
 
   const navTo = (path: string) => {
     // Spec: "it should not go to tryon camera page until it select garments"
@@ -116,9 +130,11 @@ export function HomePage() {
   const goProducts = () => navigate("/products");
 
   return (
-    <div className="min-h-screen lg:h-screen bg-background flex flex-col overflow-y-auto lg:overflow-hidden">
-      {/* Sticky header with hamburger menu — visible on ALL screen sizes */}
-      <header className="sticky top-0 z-40 shrink-0 bg-background/95 backdrop-blur-md border-b border-border/40">
+    <div className="min-h-screen bg-background flex flex-col">
+      {/* Sticky header with hamburger menu — visible on ALL screen sizes.
+          `relative` so the absolute-positioned dropdown menu anchors here.
+          The page scrolls naturally; the header sticks to the top. */}
+      <header className="relative sticky top-0 z-40 shrink-0 bg-background/95 backdrop-blur-md border-b border-border/40">
         <div className="px-3 sm:px-6 lg:px-10 py-3 sm:py-5 flex items-center justify-between gap-2">
           <BrandLockup
             logoUrl={logoUrl}
@@ -144,37 +160,45 @@ export function HomePage() {
           </div>
         </div>
 
-        {/* Slide-down nav panel — visible on ALL screen sizes */}
+        {/* Slide-down nav panel — OVERLAY (absolute positioned so it doesn't
+            push the content below). Closes on any navigation action. */}
         <AnimatePresence>
           {menuOpen && (
-            <motion.nav
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-              className="overflow-hidden border-t border-border/40 bg-card"
-            >
-              <div className="px-3 sm:px-6 lg:px-10 py-2 grid grid-cols-1 gap-1">
-                <MenuBtn icon={<HomeIcon className="h-4 w-4" />} label="Home" active={location.pathname === "/home"} onClick={() => navTo("/home")} />
-                <MenuBtn icon={<Shirt className="h-4 w-4" />} label="Collection" active={location.pathname === "/products" || location.pathname.startsWith("/products/")} onClick={() => navTo("/products")} />
-                <MenuBtn icon={<CameraIcon className="h-4 w-4" />} label="Try-on camera" active={location.pathname === "/tryon/camera" || location.pathname === "/tryon/processing" || location.pathname === "/tryon/result"} onClick={() => navTo("/tryon/camera")} />
-                <MenuBtn icon={<ImageIcon className="h-4 w-4" />} label="Captures gallery" active={location.pathname === "/captures-gallery"} onClick={() => navTo("/captures-gallery")} />
-                <MenuBtn icon={<ImageIcon className="h-4 w-4" />} label="Try-on results" active={location.pathname === "/tryon-results"} onClick={() => navTo("/tryon-results")} />
-                <MenuBtn icon={<Tag className="h-4 w-4" />} label="New arrivals" active={location.pathname === "/new-arrivals"} onClick={() => navTo("/new-arrivals")} />
-                {showSettings && (
-                  <MenuBtn icon={<Settings className="h-4 w-4" />} label="Settings" active={location.pathname === "/settings"} onClick={() => navTo("/settings")} />
-                )}
-                {!isPublicUser && (
-                  <button
-                    onClick={handleSignOut}
-                    className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition hover:bg-destructive/10 text-destructive"
-                  >
-                    <LogOut className="h-4 w-4" />
-                    <span>Sign out</span>
-                  </button>
-                )}
-              </div>
-            </motion.nav>
+            <>
+              {/* Transparent backdrop — click anywhere to close */}
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setMenuOpen(false)}
+              />
+              <motion.nav
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                className="absolute top-full left-0 right-0 z-50 overflow-hidden border-t border-border/40 bg-card shadow-elevated"
+              >
+                <div className="px-3 sm:px-6 lg:px-10 py-2 grid grid-cols-1 gap-1">
+                  <MenuBtn icon={<HomeIcon className="h-4 w-4" />} label="Home" active={location.pathname === "/home"} onClick={() => navTo("/home")} />
+                  <MenuBtn icon={<Shirt className="h-4 w-4" />} label="Collection" active={location.pathname === "/products" || location.pathname.startsWith("/products/")} onClick={() => navTo("/products")} />
+                  <MenuBtn icon={<CameraIcon className="h-4 w-4" />} label="Try-on camera" active={location.pathname === "/tryon/camera" || location.pathname === "/tryon/processing" || location.pathname === "/tryon/result"} onClick={() => navTo("/tryon/camera")} />
+                  <MenuBtn icon={<ImageIcon className="h-4 w-4" />} label="Captures gallery" active={location.pathname === "/captures-gallery"} onClick={() => navTo("/captures-gallery")} />
+                  <MenuBtn icon={<ImageIcon className="h-4 w-4" />} label="Try-on results" active={location.pathname === "/tryon-results"} onClick={() => navTo("/tryon-results")} />
+                  <MenuBtn icon={<Tag className="h-4 w-4" />} label="New arrivals" active={location.pathname === "/new-arrivals"} onClick={() => navTo("/new-arrivals")} />
+                  {showSettings && (
+                    <MenuBtn icon={<Settings className="h-4 w-4" />} label="Settings" active={location.pathname === "/settings"} onClick={() => navTo("/settings")} />
+                  )}
+                  {!isPublicUser && (
+                    <button
+                      onClick={handleSignOut}
+                      className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition hover:bg-destructive/10 text-destructive"
+                    >
+                      <LogOut className="h-4 w-4" />
+                      <span>Sign out</span>
+                    </button>
+                  )}
+                </div>
+              </motion.nav>
+            </>
           )}
         </AnimatePresence>
       </header>
@@ -259,13 +283,13 @@ export function HomePage() {
       </section>
 
       {/*
-        Trending products — ALWAYS visible (all screen sizes).
-        flex-1 + min-h-0 lets it grow to fill the space between cover and footer.
-        Internal overflow-y-auto means only this list scrolls — the page itself
-        never scrolls. The root div has h-screen + overflow-hidden.
+        Trending products — the whole page scrolls naturally.
+        The TrendingProducts header is `sticky top-[80px]` so it sticks under
+        the main header when scrolled. The grid itself is part of the normal
+        page flow — no internal scroll container.
       */}
-      <section className="flex flex-col lg:flex-1 lg:min-h-0">
-        <TrendingProducts className="lg:flex-1 lg:min-h-0" />
+      <section className="flex flex-col">
+        <TrendingProducts className="" />
       </section>
 
       {/*
@@ -281,6 +305,25 @@ export function HomePage() {
           <span className="hidden md:inline">Designed for 35″–85″ touch displays</span>
         </span>
       </footer>
+
+      {/* Scroll-to-top floating button — appears when the user scrolls down
+          more than 400px. Smooth-scrolls back to the top. Positioned
+          bottom-right so it doesn't overlap the Activity overlay (bottom-right
+          on desktop) — we put it bottom-left on large screens. */}
+      <AnimatePresence>
+        {showScrollTop && (
+          <motion.button
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0, opacity: 0 }}
+            onClick={scrollToTop}
+            className="fixed bottom-4 left-4 lg:left-auto lg:right-4 z-30 h-12 w-12 rounded-full bg-primary text-primary-foreground shadow-elevated grid place-items-center hover:bg-primary/90 transition"
+            aria-label="Scroll to top"
+          >
+            <ArrowUp className="h-5 w-5" />
+          </motion.button>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

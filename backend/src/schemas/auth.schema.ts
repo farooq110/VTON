@@ -1,9 +1,25 @@
 import { z } from 'zod';
 
-export const signinSchema = z.object({
-  email: z.string().email('Must be a valid email'),
-  password: z.string().min(1, 'Password is required'),
-});
+/**
+ * Sign-in schema — accepts EITHER `email` OR `identifier` (the frontend sends
+ * `identifier` to support email-or-franchise-name login). The auth service
+ * normalizes both to an email lookup. Both fields are optional in the schema
+ * but the refine() enforces that exactly one of them is present.
+ *
+ * This keeps the existing `/signin` endpoint backward-compatible: callers
+ * that sent `{ email, password }` still work, and callers that send
+ * `{ identifier, password }` (the new frontend convention) also work.
+ */
+export const signinSchema = z
+  .object({
+    email: z.string().email('Must be a valid email').optional(),
+    identifier: z.string().min(1).optional(),
+    password: z.string().min(1, 'Password is required'),
+  })
+  .refine((data) => !!data.email || !!data.identifier, {
+    message: 'Either email or identifier is required',
+    path: ['email'],
+  });
 export type SigninInput = z.infer<typeof signinSchema>;
 
 export const forgotPasswordSchema = z.object({
