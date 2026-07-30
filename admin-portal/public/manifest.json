@@ -1,0 +1,21 @@
+{
+  "name": "Admin Portal",
+  "short_name": "Admin",
+  "description": "Admin portal for managing customers, franchises, VTON, and pricing.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0a84ff",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

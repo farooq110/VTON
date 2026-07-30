@@ -1,0 +1,203 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // Swap to "postgresql" + a Postgres DATABASE_URL for production.
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model Admin {
+  id           String    @id @default(cuid()) @map("_id")
+  email        String    @unique
+  name         String
+  passwordHash String
+  role         String    @default("ADMIN")
+  resetToken   String?
+  resetExpires DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Customer {
+  id            String             @id @default(cuid()) @map("_id")
+  name          String
+  email         String             @unique
+  phone         String?
+  businessName  String
+  businessType  String?
+  taxId         String?
+  address       String?
+  status        String             @default("ACTIVE")
+  notes         String?
+  franchises    Franchise[]
+  apiKeys       ApiKey[]
+  usages        Usage[]
+  notifications Notification[]
+  pricingTiers  CustomerPricing[]
+  invoices      Invoice[]
+  vtonRequests  VtonRequest[]
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([status])
+}
+
+model Franchise {
+  id           String       @id @default(cuid()) @map("_id")
+  name         String
+  email        String?
+  phone        String?
+  managerName  String?
+  address      String?
+  status       String       @default("ACTIVE")
+  customerId   String
+  customer     Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  usages       Usage[]
+  vtonRequests VtonRequest[]
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+}
+
+model ApiKey {
+  id            String       @id @default(cuid()) @map("_id")
+  keyEncrypted  String
+  keyHint       String
+  keyPrefix     String
+  customerId    String
+  customer      Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  defaultCredit Int          @default(280)
+  usedCredit    Int          @default(0)
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  lastUsedAt    DateTime?
+  vtonRequests  VtonRequest[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([customerId])
+}
+
+model Usage {
+  id          String     @id @default(cuid()) @map("_id")
+  customerId  String
+  customer    Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  franchiseId String?
+  franchise   Franchise? @relation(fields: [franchiseId], references: [id], onDelete: SetNull)
+  apiKeyId    String?
+  creditsUsed Int        @default(1)
+  endpoint    String?
+  method      String?
+  statusCode  Int?
+  ipAddress   String?
+  userAgent   String?
+  day         DateTime   @default(now())
+  createdAt   DateTime   @default(now())
+
+  @@index([customerId, day])
+  @@index([franchiseId, day])
+  @@index([apiKeyId])
+}
+
+model Notification {
+  id         String    @id @default(cuid()) @map("_id")
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type       String
+  title      String
+  message    String
+  severity   String    @default("INFO")
+  read       Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+
+  @@index([customerId, read])
+  @@index([createdAt])
+}
+
+model ActivityLog {
+  id         String   @id @default(cuid()) @map("_id")
+  level      String   @default("info")
+  category   String   @default("system")
+  message    String
+  meta       String?
+  statusCode Int?
+  path       String?
+  method     String?
+  durationMs Int?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([level, createdAt])
+  @@index([category, createdAt])
+}
+
+model VtonRequest {
+  id           String     @id @default(cuid()) @map("_id")
+  apiKeyId     String
+  apiKey       ApiKey     @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  customerId   String
+  customer     Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  franchiseId  String?
+  franchise    Franchise? @relation(fields: [franchiseId], references: [id], onDelete: SetNull)
+  fashnId      String?
+  inputsHash   String?
+  status       String     @default("pending")
+  inputs       String
+  output       String?
+  errorName    String?
+  errorMessage String?
+  creditsUsed  Int        @default(0)
+  completedAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([apiKeyId])
+  @@index([customerId])
+  @@index([franchiseId])
+  @@index([fashnId])
+  @@index([inputsHash])
+  @@index([status, createdAt])
+}
+
+model CustomerPricing {
+  id         String   @id @default(cuid()) @map("_id")
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  startRange Int
+  endRange   Int
+  priceCents Int
+  label      String?
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([customerId, active])
+}
+
+model Invoice {
+  id             String   @id @default(cuid()) @map("_id")
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  invoiceNumber  String   @unique
+  status         String   @default("DRAFT")
+  periodStart    DateTime
+  periodEnd      DateTime
+  totalCredits   Int      @default(0)
+  lineItems      String
+  totals         String
+  notes          String?
+  pdfUrl         String?
+  sentToCustomer Boolean  @default(false)
+  sentAt         DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([status, createdAt])
+  @@index([periodStart, periodEnd])
+}
