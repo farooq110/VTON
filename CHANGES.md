@@ -157,3 +157,47 @@ Plus a top-level `README.md` linking to all of the above.
 3. **FASHN.ai API key not set** — The TryOn orchestrator gracefully falls back to a mock result (the captured image) so the full flow works end-to-end without a real AI provider. Set `tryOnApiEndpoint` + `tryOnApiKey` in the Settings UI for real results.
 4. **MongoDB required** — The backend needs a MongoDB instance to run. Use `mongodb://localhost:27017/vton` for local dev, or MongoDB Atlas free tier for cloud.
 5. **Redis optional** — BullMQ's `enqueueEmail()` no-ops if Redis is unreachable. Passcodes still work in dev (surfaced in the API response + UI).
+
+---
+
+## 2026-07-31 — TryOn API HTTP 404 fix
+
+### Problem
+The frontend logged `TryOn AI call failed: HTTP 404` when the user clicked
+"Try On", even though the backend was running and the user was signed in.
+
+### Root cause
+The `/api/tryon/run` route (in `backend/src/routes/tryon-track.routes.ts`)
+threw an error prefixed `NOT_FOUND:` when the `TRYON_AI_ENDPOINT` env var
+was empty (which is the default). The centralized error middleware maps any
+`NOT_FOUND:`-prefixed error to HTTP 404 — so the route, which actually
+exists, appeared to be missing from the client's perspective.
+
+### Changes
+
+| File | Change | Why |
+|------|--------|-----|
+| `backend/src/routes/tryon-track.routes.ts` | When `TRYON_AI_ENDPOINT` is empty, return a **200 mock response** (echo the user's image) with `mock: true`. When set, properly forward to the AI provider. | Eliminates the HTTP 404 entirely. App now works end-to-end out of the box, no external API setup required. |
+| `backend/src/app.ts` | Increased `express.json` body limit from `1mb` to `25mb` | The `/api/tryon/run` endpoint sends the captured photo as a base64 data URL inside JSON. A 2MB JPEG becomes ~2.7MB of base64 text, which previously caused HTTP 413 Payload Too Large errors that surfaced as "TryOn AI call failed" on the client. |
+| `backend/.env` (new) | Added default `.env` with safe dev values | Backend now boots out-of-the-box without manual env setup. Uses random `JWT_SECRET` + `ENCRYPTION_KEY`, MongoDB at `localhost:27017`, mock mode for TryOn AI. |
+| `backend/.env.example` | Documented mock mode behavior | Made it clear that leaving `TRYON_AI_ENDPOINT` blank is intentional and enables mock mode. |
+| `frontend/.env` (new) | Added default `.env` with `VITE_API_BASE_URL=http://localhost:4000/api` | Frontend talks to backend without manual configuration. |
+| `frontend/.env.example` (new) | Template for frontend env | Documentation. |
+| `README.md` | Added "Troubleshooting — TryOn API HTTP 404" section | Self-documenting fix for future developers. |
+
+### Verification
+A test script (`/home/z/my-project/scripts/verify-tryon-fix.sh`) was created
+and run. All 4 tests passed:
+
+1. ✅ `/api/tryon/run` returns 401 (auth required) — NOT 404 (route missing).
+2. ✅ `/health` endpoint responds (200 if DB up, 503 if DB down).
+3. ✅ 3MB JSON body accepted (no 413) — the new 25mb limit works.
+4. ✅ Genuinely missing routes still return 404 (preserved expected behavior).
+
+### What didn't change
+- All existing backend APIs preserved — no breaking changes.
+- All frontend code unchanged — the orchestrator's graceful fallback still
+  works as a defense-in-depth layer (in case the backend is fully unreachable).
+- Database schema, auth flow, product/brand/track endpoints — untouched.
+- The `/api/vton/tryon` route (FASHN.ai submission with per-customer API
+  keys) — untouched. Only the simpler `/api/tryon/run` proxy was fixed.

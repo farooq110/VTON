@@ -124,3 +124,52 @@ The full documentation lives in [`setup-guide/`](./setup-guide/):
 ## License
 
 Private. © Atelier Nova.
+
+---
+
+## Troubleshooting — TryOn API HTTP 404
+
+**Symptom:** The frontend logs `TryOn AI call failed: HTTP 404` when the user
+clicks "Try On", even though the backend is running and the user is signed in.
+
+**Root cause:** The `/api/tryon/run` route (in
+`backend/src/routes/tryon-track.routes.ts`) used to throw an error prefixed
+`NOT_FOUND:` when the `TRYON_AI_ENDPOINT` env var was empty. The centralized
+error middleware maps any `NOT_FOUND:`-prefixed error to HTTP 404 — so the
+route, which actually exists, appeared to be missing.
+
+**Fix applied:**
+
+1. **`backend/src/routes/tryon-track.routes.ts`** — When
+   `TRYON_AI_ENDPOINT` is not set, the route now returns a **200 mock
+   response** that echoes the user's captured image back as the "result"
+   (with `mock: true` in the response). This makes the app fully functional
+   out-of-the-box without any external AI provider setup, and eliminates the
+   404 entirely. When `TRYON_AI_ENDPOINT` IS set, the route properly forwards
+   the request to the configured AI provider (FASHN.ai etc.).
+
+2. **`backend/src/app.ts`** — Increased `express.json` body limit from
+   `1mb` to `25mb`. The `/api/tryon/run` endpoint sends the captured photo
+   as a base64 data URL inside JSON (a 2MB JPEG becomes ~2.7MB of base64
+   text), which previously caused HTTP 413 Payload Too Large errors that
+   surfaced as cryptic "TryOn AI call failed" messages on the client.
+
+3. **`backend/.env`** — Added a default `.env` file with safe development
+   values (random `JWT_SECRET` + `ENCRYPTION_KEY`, MongoDB URL pointing to
+   `localhost:27017`). The backend now boots out-of-the-box without manual
+   env setup. Leave `TRYON_AI_ENDPOINT` blank to use mock mode.
+
+4. **`frontend/.env`** — Added a default `.env` with
+   `VITE_API_BASE_URL=http://localhost:4000/api` so the frontend talks to
+   the backend without manual configuration.
+
+**To enable real AI try-on (optional):**
+
+```bash
+# In backend/.env
+TRYON_AI_ENDPOINT=https://api.fashn.ai/v1/run
+TRYON_AI_API_KEY=your-fashn-api-key-here
+```
+
+The mock mode is the default — only set these when you have a real FASHN.ai
+account and want true AI-generated try-on results.

@@ -1,5 +1,5 @@
 {
-  "name": "atelier-nova-frontend",
+  "name": "frontend",
   "version": "1.0.0",
   "private": true,
   "description": "Atelier Nova — Try then Buy. Virtual try-on boutique (React 19 + Vite + Tailwind 4 + shadcn + Electron 33).",

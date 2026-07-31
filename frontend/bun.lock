@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "atelier-nova-frontend",
+      "name": "frontend",
       "dependencies": {
         "@hookform/resolvers": "^3.10.0",
         "@radix-ui/react-dialog": "^1.1.19",

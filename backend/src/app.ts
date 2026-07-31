@@ -40,8 +40,13 @@ export function createApp(): Express {
       allowedHeaders: ['Content-Type', 'Authorization'],
     }),
   );
-  app.use(express.json({ limit: '1mb' }));
-  app.use(express.urlencoded({ extended: true }));
+  // 25mb limit — the frontend's /api/tryon/run endpoint sends the captured
+  // photo as a base64 data URL inside JSON, which can easily exceed 1MB
+  // (a 2MB JPEG becomes ~2.7MB of base64 text). The previous 1mb limit
+  // caused HTTP 413 Payload Too Large errors that surfaced as cryptic
+  // "TryOn AI call failed" messages on the client.
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
   app.use(cookieParser());
 
   // --- Request logging (before routes so every request is logged) ---
