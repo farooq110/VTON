@@ -12,19 +12,17 @@ import type { DetectionModelId, PoseThresholds } from "@/types";
  * `Xenova/yolov8n-pose`. However, the underlying ONNX model CAN be loaded +
  * run via `AutoModel.from_pretrained()` which skips the pipeline-task check.
  *
- * This performs raw inference:
- *   1. `AutoProcessor.from_pretrained(modelId)` — loads the image preprocessor
- *      (resize, normalize, etc.)
- *   2. `AutoModel.from_pretrained(modelId)` — loads the ONNX model weights
- *   3. `processor(image)` → input tensors
- *   4. `model(inputs)` → output tensors
- *   5. Parse the YOLOv8 output tensor into bounding boxes + 17 COCO keypoints
+ * **Output parsing:**
+ * YOLOv8-pose raw ONNX output shape: [1, 56, num_anchors]
+ *   - 56 = 4 (bbox: cx, cy, w, h) + 1 (confidence) + 51 (17 keypoints × 3)
+ *   - Each anchor is a candidate detection
+ *   - We filter by confidence threshold + apply NMS (Non-Maximum Suppression)
+ *     to remove overlapping detections
+ *   - The confidence is at index 4 of each anchor's 56-value vector
+ *   - WITHOUT proper NMS, every anchor above threshold counts as a "person"
+ *     → causes false "multi-person" errors (10, 40, etc.)
  *
  * **Loading:** `@huggingface/transformers@3.0.2` loaded from CDN `+esm` endpoint.
- * Model weights (~3.2 MB) download from HuggingFace Hub on first use.
- *
- * **Resilience:** The model download can take 5–30s on slow connections.
- * The hook exposes `modelStatus` + `modelProgress` so the UI can show progress.
  */
 
 export type PersonDetectionResult =
@@ -53,18 +51,16 @@ export type ModelStatus = "idle" | "loading" | "ready" | "error";
 const MODEL_REPO: Record<DetectionModelId, string> = {
   "yolov8n-pose": "Xenova/yolov8n-pose",
   "yolov8s-pose": "Xenova/yolov8s-pose",
-  "mediapipe-pose": "Xenova/yolov8n-pose", // fallback (mediapipe repo doesn't exist)
-  "movenet-lightning": "Xenova/yolov8n-pose", // fallback (uses YOLOv8n under the hood)
+  "mediapipe-pose": "Xenova/yolov8n-pose",
+  "movenet-lightning": "Xenova/yolov8n-pose",
 };
 
-/** CDN URLs for `@huggingface/transformers` v3 ESM build. */
 const TRANSFORMERS_CDN_URLS = [
   "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2/+esm",
   "https://esm.run/@huggingface/transformers@3.0.2",
   "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.0/+esm",
 ];
 
-/** COCO 17 keypoint names (standard YOLOv8-pose output order). */
 const COCO_KEYPOINT_NAMES = [
   "nose", "left_eye", "right_eye", "left_ear", "right_ear",
   "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -72,12 +68,13 @@ const COCO_KEYPOINT_NAMES = [
   "left_knee", "right_knee", "left_ankle", "right_ankle",
 ];
 
-// Cache the model + processor per-model so we only download once per session
+const MODEL_LOAD_TIMEOUT_MS = 60_000;
+
+// ─── Module-level caches ────────────────────────────────────────────── //
 const modelCache = new Map<DetectionModelId, { model: any; processor: any }>();
 const inFlightLoads = new Map<DetectionModelId, Promise<{ model: any; processor: any }>>();
 const loadedModels = new Set<DetectionModelId>();
 
-// ─── Global single-source-of-truth state for model cache ────────────── //
 type ModelCacheListener = (modelId: DetectionModelId, isCached: boolean) => void;
 const modelCacheListeners = new Set<ModelCacheListener>();
 
@@ -124,12 +121,7 @@ async function loadTransformers(): Promise<any> {
 }
 
 /**
- * Loads the model + processor via `AutoModel.from_pretrained()` +
- * `AutoProcessor.from_pretrained()`.
- *
- * This BYPASSES the `pipeline()` task-check that throws
- * `Unsupported model type: yolov8`. AutoModel loads the ONNX weights directly
- * without checking if the architecture is in the supported pipeline registry.
+ * Loads model + processor via AutoModel (bypasses pipeline() task-check).
  */
 async function getModelAndProcessor(
   modelId: DetectionModelId,
@@ -152,7 +144,6 @@ async function getModelAndProcessor(
       }
     };
 
-    // Load processor + model in parallel (both download from HF Hub)
     const [processor, model] = await Promise.all([
       AutoProcessor.from_pretrained(repo, { progress_callback: progressCb }),
       AutoModel.from_pretrained(repo, { progress_callback: progressCb }),
@@ -181,128 +172,129 @@ async function getModelAndProcessor(
 }
 
 /**
- * Parses the raw YOLOv8-pose output tensor into detection results.
+ * Computes Intersection over Union (IoU) between two bounding boxes.
+ * Used for NMS (Non-Maximum Suppression) to remove overlapping detections.
+ */
+function computeIoU(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): number {
+  const ax1 = a.x - a.w / 2, ay1 = a.y - a.h / 2, ax2 = a.x + a.w / 2, ay2 = a.y + a.h / 2;
+  const bx1 = b.x - b.w / 2, by1 = b.y - b.h / 2, bx2 = b.x + b.w / 2, by2 = b.y + b.h / 2;
+
+  const ix1 = Math.max(ax1, bx1), iy1 = Math.max(ay1, by1);
+  const ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
+  const iw = Math.max(0, ix2 - ix1), ih = Math.max(0, iy2 - iy1);
+  const intersection = iw * ih;
+  const union = a.w * a.h + b.w * b.h - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+/**
+ * Non-Maximum Suppression — removes overlapping detections, keeping only
+ * the highest-confidence one in each cluster.
+ */
+function nms(detections: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }>, iouThreshold = 0.5): Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> {
+  const sorted = [...detections].sort((a, b) => b.score - a.score);
+  const kept: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> = [];
+  for (const det of sorted) {
+    let keep = true;
+    for (const k of kept) {
+      if (computeIoU(det.bbox, k.bbox) > iouThreshold) {
+        keep = false;
+        break;
+      }
+    }
+    if (keep) kept.push(det);
+  }
+  return kept;
+}
+
+/**
+ * Parses the raw YOLOv8-pose output tensor into detections.
  *
- * YOLOv8-pose output shape: [1, 56, 8400] (for 640x640 input)
- *   - 56 = 4 (bbox: cx, cy, w, h) + 1 (confidence) + 51 (17 keypoints × 3: x, y, score)
- *   - 8400 = number of anchor points
+ * Output shape: [1, 56, num_anchors] (e.g., [1, 56, 8400] for 640×640 input)
+ *   - dim[1] = 56 features per anchor:
+ *     [0..3] = bbox (cx, cy, w, h) — normalized to 0..1
+ *     [4]    = confidence score (0..1)
+ *     [5..56] = 17 keypoints × 3 (x, y, score) — in pixel coords of 640×640 input
+ *   - dim[2] = num_anchors (8400 for 640×640)
  *
- * We:
- *   1. Transpose to [8400, 56] so each row is one detection
- *   2. Filter by confidence threshold
- *   3. Take the top detection (highest confidence)
- *   4. Extract bbox + keypoints
+ * The data layout is [feature, anchor] — i.e., data[anchor_idx + feature_idx * num_anchors]
  *
- * Keypoint coordinates are in the model's input pixel space (0–640) and
- * normalized to the original image dimensions after.
+ * Steps:
+ *   1. Extract all anchors with confidence >= minScore
+ *   2. Apply NMS (IoU > 0.5) to remove overlapping boxes
+ *   3. Extract keypoints from the top detections
  */
 function parseYolov8PoseOutput(
   outputTensor: any,
   minScore: number,
   imgWidth: number,
   imgHeight: number,
-): { persons: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: { x: number; y: number; w: number; h: number } }> } {
-  // outputTensor is a Tensor with .data (Float32Array) and .dims
+): { persons: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> } {
   const data: Float32Array = outputTensor.data;
   const dims: number[] = outputTensor.dims;
 
-  // Expected dims: [1, 56, num_anchors] or [1, num_anchors, 56]
-  // We need to figure out which dimension is 56 (features) and which is anchors
-  let features: number;
-  let anchors: number;
-  let transposed = false;
-
-  if (dims.length === 3) {
-    if (dims[1] < dims[2]) {
-      // [1, features, anchors] → need to transpose
-      features = dims[1];
-      anchors = dims[2];
-      transposed = true;
-    } else {
-      // [1, anchors, features] → already in the right order
-      features = dims[2];
-      anchors = dims[1];
-    }
-  } else {
-    // Unexpected shape — return empty
+  // Expected: [1, 56, num_anchors]
+  if (dims.length !== 3) {
+    logger.model(`Unexpected YOLOv8 output dims: ${JSON.stringify(dims)}`, { level: "warn" });
     return { persons: [] };
   }
 
-  const numKp = 17; // COCO keypoints
-  const expectedFeatures = 4 + 1 + numKp * 3; // 4 (bbox) + 1 (conf) + 51 (kps) = 56
+  const numFeatures = dims[1]; // 56
+  const numAnchors = dims[2];  // 8400
+  const numKp = 17;
+  const expectedFeatures = 4 + 1 + numKp * 3; // 56
 
-  // If features doesn't match 56, the output format is different — bail
-  if (features !== expectedFeatures) {
-    logger.model(`Unexpected YOLOv8 output features: ${features} (expected ${expectedFeatures})`, { level: "warn" });
+  if (numFeatures !== expectedFeatures) {
+    logger.model(`Unexpected features: ${numFeatures} (expected ${expectedFeatures})`, { level: "warn" });
     return { persons: [] };
   }
 
-  const persons: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> = [];
+  // Step 1: Extract candidate detections with confidence >= minScore
+  const candidates: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> = [];
 
-  for (let a = 0; a < anchors; a++) {
-    // Get the confidence score for this anchor
-    let conf: number;
-    if (transposed) {
-      // [1, features, anchors] → data[a * features + 4]
-      conf = data[4 * anchors + a];
-    } else {
-      // [1, anchors, features] → data[a * features + 4]
-      conf = data[a * features + 4];
-    }
-
+  for (let a = 0; a < numAnchors; a++) {
+    // Confidence is at feature index 4, laid out as data[4 * numAnchors + a]
+    const conf = data[4 * numAnchors + a];
     if (conf < minScore) continue;
 
-    // Extract bbox (cx, cy, w, h) — normalized to 0–1 by the processor
-    let cx, cy, w, h: number;
-    if (transposed) {
-      cx = data[0 * anchors + a];
-      cy = data[1 * anchors + a];
-      w = data[2 * anchors + a];
-      h = data[3 * anchors + a];
-    } else {
-      cx = data[a * features + 0];
-      cy = data[a * features + 1];
-      w = data[a * features + 2];
-      h = data[a * features + 3];
-    }
+    // Bbox: cx, cy, w, h (feature indices 0-3)
+    const cx = data[0 * numAnchors + a];
+    const cy = data[1 * numAnchors + a];
+    const w = data[2 * numAnchors + a];
+    const h = data[3 * numAnchors + a];
 
-    // Extract 17 keypoints (each 3 values: x, y, score)
+    // Keypoints: 17 × 3 (x, y, score) starting at feature index 5
     const keypoints: PoseKeypoint[] = [];
     for (let kp = 0; kp < numKp; kp++) {
-      const kpOffset = 5 + kp * 3; // after bbox(4) + conf(1)
-      let kx, ky, ks: number;
-      if (transposed) {
-        kx = data[kpOffset * anchors + a];
-        ky = data[(kpOffset + 1) * anchors + a];
-        ks = data[(kpOffset + 2) * anchors + a];
-      } else {
-        kx = data[a * features + kpOffset];
-        ky = data[a * features + kpOffset + 1];
-        ks = data[a * features + kpOffset + 2];
-      }
-      // Keypoints are in pixel coords of the 640×640 input — normalize to 0–1
-      // relative to the original image
+      const base = 5 + kp * 3;
+      // Keypoint coords are in the model's input pixel space (640×640)
+      // Normalize to 0..1 relative to the original image
+      const kx = data[base * numAnchors + a] / imgWidth;
+      const ky = data[(base + 1) * numAnchors + a] / imgHeight;
+      const ks = data[(base + 2) * numAnchors + a];
       keypoints.push({
         name: COCO_KEYPOINT_NAMES[kp] ?? `kp_${kp}`,
-        x: kx / imgWidth,
-        y: ky / imgHeight,
+        x: kx,
+        y: ky,
         score: ks,
       });
     }
 
-    persons.push({
+    candidates.push({
       score: conf,
       keypoints,
       bbox: { x: cx, y: cy, w, h },
     });
   }
 
-  // Sort by confidence (highest first)
-  persons.sort((a, b) => b.score - a.score);
-  return { persons };
-}
+  logger.model(`YOLOv8 raw: ${candidates.length} candidates above ${minScore} confidence`, { level: "info" });
 
-const MODEL_LOAD_TIMEOUT_MS = 60_000;
+  // Step 2: Apply NMS to remove overlapping detections
+  const suppressed = nms(candidates, 0.5);
+
+  // Step 3: Return the filtered detections
+  return { persons: suppressed };
+}
 
 export function usePoseDetection() {
   const lastKeyedRef = useRef<PoseKeypoint[]>([]);
@@ -340,43 +332,31 @@ export function usePoseDetection() {
         setModelStatus("ready");
         setModelProgress(1);
 
-        // Load the image via RawImage (transformers.js helper)
         const { RawImage } = transformersModule!;
         const image = await RawImage.fromURL(imageDataUrl);
 
         const inferStart = Date.now();
-        // Preprocess the image → input tensors
         const inputs = await processor(image);
 
-        // The YOLOv8 model expects an input key called `images`, but the
-        // processor outputs `pixel_values`. Remap so the model finds its input.
-        // (This is the fix for "Missing the following inputs: images".)
+        // Remap: processor outputs `pixel_values`, model expects `images`
         const modelInputs: Record<string, any> = {};
         if (inputs.pixel_values !== undefined) {
           modelInputs.images = inputs.pixel_values;
         }
-        // Copy any other inputs the model might need (e.g., orig_target_sizes)
         for (const [key, value] of Object.entries(inputs)) {
           if (key !== "pixel_values" && key !== "images") {
             modelInputs[key] = value;
           }
         }
-        // If the model also needs orig_target_sizes (some YOLOv8 variants do),
-        // pass the image dimensions
-        if (!modelInputs.orig_target_sizes && inputs.reshaped_input_sizes) {
-          modelInputs.orig_target_sizes = inputs.reshaped_input_sizes;
-        }
 
-        // Run the model forward pass
         const outputs = await model(modelInputs);
 
-        // YOLOv8-pose output is typically `output0` (the main detection tensor)
+        // YOLOv8-pose output is typically `output0`
         const outputTensor = outputs.output0 ?? outputs.output ?? outputs[Object.keys(outputs)[0]];
         if (!outputTensor) {
           throw new Error("Model output missing detection tensor");
         }
 
-        // Parse the raw YOLOv8 output into persons + keypoints
         const { persons } = parseYolov8PoseOutput(
           outputTensor,
           minScore,
@@ -392,7 +372,6 @@ export function usePoseDetection() {
         if (persons.length === 0) return { kind: "no-person", score: 0 };
         if (persons.length > 1) return { kind: "multi-person", personCount: persons.length, score: persons[0].score };
 
-        // Single person — use the top detection
         const person = persons[0];
         lastKeyedRef.current = person.keypoints;
         return { kind: "ok", personCount: 1, score: person.score, keypoints: person.keypoints };

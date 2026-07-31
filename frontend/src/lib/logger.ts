@@ -88,12 +88,7 @@ class Logger {
     }
   }
 
-  /** Send an error log to the backend telemetry endpoint (fire-and-forget).
-   *
-   *  Uses the VITE_API_BASE_URL env var (same as the api-client) so the
-   *  request goes to the backend (localhost:4000), not the frontend dev
-   *  server (localhost:5173). Falls back gracefully if the backend is
-   *  unreachable — telemetry is best-effort and must never break the app. */
+  /** Send an error log to the backend telemetry endpoint (fire-and-forget). */
   private async sendTelemetry(entry: {
     category: string;
     label: string;
@@ -103,8 +98,7 @@ class Logger {
   }): Promise<void> {
     try {
       const token = localStorage.getItem("nova_token");
-      const baseURL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000/api";
-      await fetch(`${baseURL}/telemetry`, {
+      await fetch("/api/telemetry", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

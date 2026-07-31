@@ -36,6 +36,7 @@ export function SettingsPage() {
   const { settings, updateSettings, resetSettings, user } = useAuthStore();
   const userRole = user?.role;
   const { toast } = useToast();
+  const { isModelCached } = usePoseDetection();
 
   const canBrand = canManageBrand(userRole);
   const canFeatures = canManageFeatures(userRole);
@@ -144,16 +145,21 @@ export function SettingsPage() {
             </section>
           )}
 
-          {/* Detection model */}
+          {/* ─── Person detection model ───────────────────────────────────
+              This model detects HOW MANY people are in the frame (0, 1, or >1)
+              and returns their bounding boxes. It's the first stage of the
+              try-on validation pipeline. */}
           {canFeatures && (
             <section className="rounded-2xl bg-card border border-border p-6">
               <div className="flex items-center gap-2 mb-3">
                 <Scan className="h-5 w-5 text-accent" />
-                <h2 className="font-display text-lg">Detection model</h2>
+                <div>
+                  <h2 className="font-display text-lg">Person detection model</h2>
+                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
+                    Detects how many people are in the camera frame (Stage 1). Rejects 0 persons or multiple persons. Models are <strong>not</strong> auto-downloaded — click &quot;Download now&quot; to fetch the weights (one-time, ~3 MB).
+                  </p>
+                </div>
               </div>
-              <p className="text-sm text-muted-foreground mb-4 leading-relaxed">
-                Choose the AI model that detects the person and checks their pose. Models are <strong>not</strong> auto-downloaded — click &quot;Download now&quot; to fetch the model weights (one-time, ~3–12 MB). After download, the status badge shows &quot;Downloaded&quot;.
-              </p>
               <div className="space-y-2">
                 {DETECTION_MODELS.map((m) => (
                   <ModelOption
@@ -167,17 +173,27 @@ export function SettingsPage() {
             </section>
           )}
 
-          {/* Posture thresholds */}
+          {/* ─── Posture estimation model ────────────────────────────────
+              This model checks the user's pose (shoulders straight, face
+              forward, full body visible). It uses the SAME model as person
+              detection (YOLOv8-pose returns both bounding boxes AND 17 COCO
+              keypoints), so it shares the download above — no separate
+              download needed. */}
           {canFeatures && (
             <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
               <div className="flex items-center gap-2">
                 <Target className="h-5 w-5 text-accent" />
                 <div>
-                  <h2 className="font-display text-lg">Posture thresholds</h2>
+                  <h2 className="font-display text-lg">Posture estimation model</h2>
                   <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Control how strict the pose check is. Lower values = more lenient (accepts tilted shoulders, turned heads). Higher values = stricter (requires near-perfect posture).
+                    Checks the user&apos;s posture (Stage 3) — shoulder tilt, face yaw/pitch, body visibility. Uses the same model as person detection above (YOLOv8-pose returns both bounding boxes AND keypoints), so no separate download is needed.
                   </p>
                 </div>
+              </div>
+              <div className="rounded-lg border border-border/60 bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
+                <strong>Active model:</strong> {DETECTION_MODELS.find((m) => m.id === settings.activeModelId)?.name ?? settings.activeModelId}
+                <br />
+                <strong>Downloaded:</strong> {isModelCached(settings.activeModelId) ? "Yes ✓" : "No — download above"}
               </div>
               <NumberField label="Person confidence (0–1)" value={settings.poseThresholds.personScore} step={0.05} min={0.3} max={0.95} onChange={(v) => setThresholds({ personScore: v })} />
               <NumberField label="Shoulder tilt (deg)" value={settings.poseThresholds.shoulderTiltDeg} step={1} min={0} max={30} onChange={(v) => setThresholds({ shoulderTiltDeg: v })} />

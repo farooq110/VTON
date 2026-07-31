@@ -20,8 +20,7 @@ export default defineConfig({
     target: "es2022",
     chunkSizeWarningLimit: 4000, // @xenova/transformers ships large WASM chunks
   },
-  // Note: @xenova/transformers + onnxruntime-web are loaded from CDN at
-  // runtime (see usePoseDetection.ts) — they're NOT bundled by Vite. This
-  // avoids the `registerBackend` undefined error that occurs when Vite's
-  // ES module bundling breaks onnxruntime-web's internal module structure.
+  optimizeDeps: {
+    exclude: ["@xenova/transformers", "onnxruntime-web"], // lazy-loaded only when try-on runs
+  },
 });

@@ -1,13 +1,6 @@
 import type { DetectionModel, TryOnSettings } from "@/types";
 
-/**
- * Detection models registered for selection in Settings.
- *
- * All models are loaded via `AutoModel.from_pretrained()` + `AutoProcessor`
- * (raw ONNX inference) which bypasses the `pipeline()` task-check that throws
- * `Unsupported model type: yolov8`. This allows us to use the actual
- * `Xenova/yolov8n-pose` HuggingFace model.
- */
+/** Detection models registered for selection in Settings. Future-ready — add new entries here. */
 export const DETECTION_MODELS: DetectionModel[] = [
   {
     id: "yolov8n-pose",
@@ -29,19 +22,19 @@ export const DETECTION_MODELS: DetectionModel[] = [
   },
   {
     id: "mediapipe-pose",
-    name: "YOLOv8n Pose (alt)",
-    description: "Uses YOLOv8n under the hood. ~3.2 MB. (MediaPipe repo not available on HuggingFace.)",
-    sizeMb: 3.2,
-    speedMs: 35,
-    accuracy: "Fast",
+    name: "MediaPipe Pose",
+    description: "Google's solution with 33 landmarks. Excellent for face/head alignment checks. ~9 MB.",
+    sizeMb: 9.0,
+    speedMs: 50,
+    accuracy: "Balanced",
     recommended: false,
   },
   {
     id: "movenet-lightning",
-    name: "YOLOv8n Pose (alt 2)",
-    description: "Uses YOLOv8n under the hood. ~3.2 MB. (MoveNet repo not available on HuggingFace.)",
-    sizeMb: 3.2,
-    speedMs: 35,
+    name: "MoveNet Lightning",
+    description: "TensorFlow Lite model, 17 keypoints. Very fast on mobile GPUs. ~12 MB.",
+    sizeMb: 12.0,
+    speedMs: 30,
     accuracy: "Fast",
     recommended: false,
   },
