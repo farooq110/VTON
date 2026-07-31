@@ -3,37 +3,28 @@ import { logger } from "@/lib/logger";
 import type { DetectionModelId, PoseThresholds } from "@/types";
 
 /**
- * usePoseDetection — abstraction over Xenova/yolov8n-pose (and future models).
+ * usePoseDetection — in-browser pose detection using `@huggingface/transformers`
+ * with `AutoModel` + `AutoProcessor` (raw ONNX inference).
  *
- * Loads `@xenova/transformers` lazily inside the renderer so the 3–12 MB model
- * only downloads when the user actually triggers try-on. The model is cached
- * by the library, so subsequent detections are instant.
+ * **Why AutoModel (not pipeline())?**
+ * The `pipeline()` function checks the model's `model_type` against a registry
+ * of supported architectures and throws `Unsupported model type: yolov8` for
+ * `Xenova/yolov8n-pose`. However, the underlying ONNX model CAN be loaded +
+ * run via `AutoModel.from_pretrained()` which skips the pipeline-task check.
  *
- * The hook returns a single `detect()` + `checkPose()` — callers never know
- * which model is active (Dependency Inversion Principle). Add new models by
- * extending the `MODEL_REPO` map below.
+ * This performs raw inference:
+ *   1. `AutoProcessor.from_pretrained(modelId)` — loads the image preprocessor
+ *      (resize, normalize, etc.)
+ *   2. `AutoModel.from_pretrained(modelId)` — loads the ONNX model weights
+ *   3. `processor(image)` → input tensors
+ *   4. `model(inputs)` → output tensors
+ *   5. Parse the YOLOv8 output tensor into bounding boxes + 17 COCO keypoints
+ *
+ * **Loading:** `@huggingface/transformers@3.0.2` loaded from CDN `+esm` endpoint.
+ * Model weights (~3.2 MB) download from HuggingFace Hub on first use.
  *
  * **Resilience:** The model download can take 5–30s on slow connections.
- * The hook exposes `modelStatus` (`idle` | `loading` | `ready` | `error`) and
- * `modelProgress` (0..1) so the UI can show a loading indicator. `detect()`
- * also has a 60-second timeout — if the model hasn't loaded by then, it throws
- * a user-friendly error instead of hanging forever.
- *
- * **Preload Status:** `isModelCached(modelId)` returns true if the model is
- * already downloaded and cached in the browser (no network fetch needed).
- * The Settings page + camera page use this to show "Downloaded" vs
- * "Not downloaded".
- *
- * **CDN Loading (fixes `registerBackend` error):**
- * The `@xenova/transformers` npm package + Vite's ES module bundling creates
- * a conflict where `onnxruntime-web`'s `registerBackend` function is
- * undefined at runtime. This is a well-known issue — the npm ESM build of
- * `onnxruntime-web` doesn't export its API correctly when bundled by Vite.
- *
- * Fix: load `@xenova/transformers` entirely from CDN via a `<script>` tag.
- * The CDN UMD build correctly initializes the ONNX runtime WASM backend
- * before transformers.js tries to use it. This bypasses Vite's bundling
- * completely — no `optimizeDeps` config needed, no version mismatch issues.
+ * The hook exposes `modelStatus` + `modelProgress` so the UI can show progress.
  */
 
 export type PersonDetectionResult =
@@ -59,65 +50,34 @@ export interface PoseCheckResult {
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
-/**
- * Model repos on HuggingFace Hub.
- *
- * In transformers.js v3, YOLOv8-pose models use the `pose-detection` task
- * (NOT `object-detection`). The `pose-detection` task returns poses with
- * keypoints directly — no need to filter by `label === "person"`.
- *
- * Only YOLOv8 variants are listed because they're the only pose models that
- * exist on HuggingFace in transformers.js format. The old `mediapipe-pose`
- * and `movenet-lightning` entries pointed to non-existent repos (401 errors).
- */
 const MODEL_REPO: Record<DetectionModelId, string> = {
   "yolov8n-pose": "Xenova/yolov8n-pose",
   "yolov8s-pose": "Xenova/yolov8s-pose",
-  "mediapipe-pose": "Xenova/yolov8n-pose", // fallback to yolov8n (mediapipe repo doesn't exist)
-  "movenet-lightning": "Xenova/yolov8n-pose", // fallback to yolov8n (movenet repo doesn't exist)
+  "mediapipe-pose": "Xenova/yolov8n-pose", // fallback (mediapipe repo doesn't exist)
+  "movenet-lightning": "Xenova/yolov8n-pose", // fallback (uses YOLOv8n under the hood)
 };
 
-/**
- * CDN URLs for `@huggingface/transformers` v3 — the renamed + upgraded
- * package (formerly `@xenova/transformers`).
- *
- * **Why v3 (not v2.17.x):**
- *   - v2.17 throws `Unsupported model type: yolov8` because YOLOv8 support
- *     was only added in v3.0.0.
- *   - The package was renamed from `@xenova/transformers` to
- *     `@huggingface/transformers` at v3.0.0.
- *
- * **Why the `+esm` endpoint (not `dist/transformers.min.js`):**
- *   The `dist/transformers.min.js` file is a webpack bundle (starts with
- *   `var e,t,n=...`) — it's NOT a proper ESM module. When loaded via dynamic
- *   `import()`, it doesn't export `pipeline` correctly, so the library
- *   appears to load but throws "Unsupported model type: yolov8" (because
- *   it's actually running a stale/cached v2 fallback).
- *
- *   The `+esm` endpoint is bundled by jsDelivr using Rollup into a proper
- *   ESM module with correct `export` statements. This is the ONLY URL that
- *   works reliably with dynamic `import()`.
- *
- * We try multiple CDN `+esm` endpoints in order so if one is slow or blocked,
- * the next is tried automatically.
- */
+/** CDN URLs for `@huggingface/transformers` v3 ESM build. */
 const TRANSFORMERS_CDN_URLS = [
   "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2/+esm",
   "https://esm.run/@huggingface/transformers@3.0.2",
   "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.0/+esm",
-  "https://esm.run/@huggingface/transformers@3.1.0",
 ];
 
-// Cache the pipeline per-model so we only download once per session
-const pipelineCache = new Map<DetectionModelId, any>();
-// Track in-flight loads so concurrent callers share the same promise
-const inFlightLoads = new Map<DetectionModelId, Promise<any>>();
-// Track which models have been successfully loaded (for preload status)
+/** COCO 17 keypoint names (standard YOLOv8-pose output order). */
+const COCO_KEYPOINT_NAMES = [
+  "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+  "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+  "left_wrist", "right_wrist", "left_hip", "right_hip",
+  "left_knee", "right_knee", "left_ankle", "right_ankle",
+];
+
+// Cache the model + processor per-model so we only download once per session
+const modelCache = new Map<DetectionModelId, { model: any; processor: any }>();
+const inFlightLoads = new Map<DetectionModelId, Promise<{ model: any; processor: any }>>();
 const loadedModels = new Set<DetectionModelId>();
 
 // ─── Global single-source-of-truth state for model cache ────────────── //
-// Components subscribe to this via a tiny pub/sub so the Settings page,
-// camera page, etc. all see the same "downloaded" status without polling.
 type ModelCacheListener = (modelId: DetectionModelId, isCached: boolean) => void;
 const modelCacheListeners = new Set<ModelCacheListener>();
 
@@ -125,111 +85,91 @@ function notifyModelCacheChange(modelId: DetectionModelId, isCached: boolean) {
   modelCacheListeners.forEach((fn) => fn(modelId, isCached));
 }
 
-/**
- * Loads `@huggingface/transformers` v3 from CDN via dynamic `import()`.
- *
- * v3 ships an ESM browser build (not UMD), so we MUST use dynamic `import()`
- * — a `<script>` tag would throw `Unexpected token 'export'` because the
- * browser would try to parse it as a classic script.
- *
- * The `/* @vite-ignore *\/` comment tells Vite NOT to try bundling this
- * import at build time — it's resolved at runtime from the CDN. This
- * bypasses Vite's ES module bundling entirely, fixing the
- * `Cannot read properties of undefined (reading 'registerBackend')` error.
- *
- * Multiple CDN URLs are tried in order. The first one that successfully
- * loads + exposes a `pipeline` function wins. If all fail, a user-friendly
- * error is thrown.
- */
-let transformersLoaded: Promise<any> | null = null;
+// ─── CDN module loading ────────────────────────────────────────────── //
+let transformersModule: any = null;
+let transformersLoading: Promise<any> | null = null;
 
-function loadTransformersFromCDN(): Promise<any> {
-  if (transformersLoaded) return transformersLoaded;
-  if ((window as any).transformers) {
-    const mod = (window as any).transformers;
-    mod.env.allowLocalModels = false;
-    transformersLoaded = Promise.resolve(mod);
-    return transformersLoaded;
-  }
+async function loadTransformers(): Promise<any> {
+  if (transformersModule) return transformersModule;
+  if (transformersLoading) return transformersLoading;
 
-  transformersLoaded = (async () => {
+  transformersLoading = (async () => {
     for (const url of TRANSFORMERS_CDN_URLS) {
       try {
         logger.model("Loading transformers.js from CDN", { detail: url });
-        // Dynamic import with @vite-ignore so Vite doesn't try to bundle it.
-        // 30s timeout via Promise.race so a slow CDN doesn't hang forever.
         const mod: any = await Promise.race([
           import(/* @vite-ignore */ url),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error("Timeout (30s)")), 30_000),
           ),
         ]);
-
-        if (mod && typeof mod.pipeline === "function") {
+        if (mod && typeof mod.AutoModel === "function") {
           mod.env.allowLocalModels = false;
-          // Expose on window so subsequent calls skip the import
           (window as any).transformers = mod;
           logger.model("transformers.js loaded from CDN", { detail: url });
+          transformersModule = mod;
           return mod;
         }
-        logger.model("CDN loaded but pipeline missing", { detail: url, level: "warn" });
+        logger.model("CDN loaded but AutoModel missing", { detail: url, level: "warn" });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "unknown error";
         logger.model("CDN failed, trying next", { detail: `${url}: ${msg}`, level: "warn" });
       }
     }
-
-    transformersLoaded = null; // allow retry on next call
-    throw new Error(
-      "Could not load the AI model library from any CDN. Check your internet connection and try again. If the problem persists, try a different network.",
-    );
+    transformersLoading = null;
+    throw new Error("Could not load transformers.js from any CDN. Check your internet connection.");
   })();
 
-  return transformersLoaded;
+  return transformersLoading;
 }
 
-async function getPipeline(
+/**
+ * Loads the model + processor via `AutoModel.from_pretrained()` +
+ * `AutoProcessor.from_pretrained()`.
+ *
+ * This BYPASSES the `pipeline()` task-check that throws
+ * `Unsupported model type: yolov8`. AutoModel loads the ONNX weights directly
+ * without checking if the architecture is in the supported pipeline registry.
+ */
+async function getModelAndProcessor(
   modelId: DetectionModelId,
   onProgress?: (p: number) => void,
-): Promise<any> {
-  if (pipelineCache.has(modelId)) return pipelineCache.get(modelId);
+): Promise<{ model: any; processor: any }> {
+  if (modelCache.has(modelId)) return modelCache.get(modelId)!;
   if (inFlightLoads.has(modelId)) return inFlightLoads.get(modelId)!;
 
   const loadPromise = (async () => {
     const startTime = Date.now();
-    logger.model(`Loading model: ${modelId}`, { detail: `repo: ${MODEL_REPO[modelId]}` });
+    const repo = MODEL_REPO[modelId];
+    logger.model(`Loading model: ${modelId}`, { detail: `repo: ${repo} (via AutoModel)` });
 
-    // 1. Load transformers.js from CDN (one-time, idempotent).
-    const transformers = await loadTransformersFromCDN();
-    const { pipeline } = transformers;
+    const transformers = await loadTransformers();
+    const { AutoModel, AutoProcessor } = transformers;
 
-    // 2. Create the pipeline using the `object-detection` task.
-    //    In @huggingface/transformers v3.0.x, `pose-detection` is NOT a
-    //    supported task (only added in v3.1+). YOLOv8-pose models are loaded
-    //    via `object-detection` — the model returns bounding boxes + keypoints
-    //    for each detected person.
-    //    Model weights download from HuggingFace Hub.
-    const pipe = await pipeline("object-detection", MODEL_REPO[modelId], {
-      progress_callback: (data: any) => {
-        if (data?.progress != null && onProgress) {
-          onProgress(Math.min(1, data.progress / 100));
-        }
-      },
-    });
+    const progressCb = (data: any) => {
+      if (data?.progress != null && onProgress) {
+        onProgress(Math.min(1, data.progress / 100));
+      }
+    };
 
-    // 3. Verify the pipeline actually loaded (not undefined).
-    if (!pipe) {
-      throw new Error("Pipeline returned undefined — model load failed silently");
+    // Load processor + model in parallel (both download from HF Hub)
+    const [processor, model] = await Promise.all([
+      AutoProcessor.from_pretrained(repo, { progress_callback: progressCb }),
+      AutoModel.from_pretrained(repo, { progress_callback: progressCb }),
+    ]);
+
+    if (!model || !processor) {
+      throw new Error("Model or processor returned undefined");
     }
 
-    pipelineCache.set(modelId, pipe);
+    modelCache.set(modelId, { model, processor });
     loadedModels.add(modelId);
     notifyModelCacheChange(modelId, true);
     logger.model(`Model loaded: ${modelId}`, {
       detail: `Cached in memory · ${((Date.now() - startTime) / 1000).toFixed(1)}s`,
       durationMs: Date.now() - startTime,
     });
-    return pipe;
+    return { model, processor };
   })();
 
   inFlightLoads.set(modelId, loadPromise);
@@ -240,12 +180,127 @@ async function getPipeline(
   }
 }
 
-const COCO_KEYPOINT_NAMES = [
-  "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-  "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-  "left_wrist", "right_wrist", "left_hip", "right_hip",
-  "left_knee", "right_knee", "left_ankle", "right_ankle",
-];
+/**
+ * Parses the raw YOLOv8-pose output tensor into detection results.
+ *
+ * YOLOv8-pose output shape: [1, 56, 8400] (for 640x640 input)
+ *   - 56 = 4 (bbox: cx, cy, w, h) + 1 (confidence) + 51 (17 keypoints × 3: x, y, score)
+ *   - 8400 = number of anchor points
+ *
+ * We:
+ *   1. Transpose to [8400, 56] so each row is one detection
+ *   2. Filter by confidence threshold
+ *   3. Take the top detection (highest confidence)
+ *   4. Extract bbox + keypoints
+ *
+ * Keypoint coordinates are in the model's input pixel space (0–640) and
+ * normalized to the original image dimensions after.
+ */
+function parseYolov8PoseOutput(
+  outputTensor: any,
+  minScore: number,
+  imgWidth: number,
+  imgHeight: number,
+): { persons: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: { x: number; y: number; w: number; h: number } }> } {
+  // outputTensor is a Tensor with .data (Float32Array) and .dims
+  const data: Float32Array = outputTensor.data;
+  const dims: number[] = outputTensor.dims;
+
+  // Expected dims: [1, 56, num_anchors] or [1, num_anchors, 56]
+  // We need to figure out which dimension is 56 (features) and which is anchors
+  let features: number;
+  let anchors: number;
+  let transposed = false;
+
+  if (dims.length === 3) {
+    if (dims[1] < dims[2]) {
+      // [1, features, anchors] → need to transpose
+      features = dims[1];
+      anchors = dims[2];
+      transposed = true;
+    } else {
+      // [1, anchors, features] → already in the right order
+      features = dims[2];
+      anchors = dims[1];
+    }
+  } else {
+    // Unexpected shape — return empty
+    return { persons: [] };
+  }
+
+  const numKp = 17; // COCO keypoints
+  const expectedFeatures = 4 + 1 + numKp * 3; // 4 (bbox) + 1 (conf) + 51 (kps) = 56
+
+  // If features doesn't match 56, the output format is different — bail
+  if (features !== expectedFeatures) {
+    logger.model(`Unexpected YOLOv8 output features: ${features} (expected ${expectedFeatures})`, { level: "warn" });
+    return { persons: [] };
+  }
+
+  const persons: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> = [];
+
+  for (let a = 0; a < anchors; a++) {
+    // Get the confidence score for this anchor
+    let conf: number;
+    if (transposed) {
+      // [1, features, anchors] → data[a * features + 4]
+      conf = data[4 * anchors + a];
+    } else {
+      // [1, anchors, features] → data[a * features + 4]
+      conf = data[a * features + 4];
+    }
+
+    if (conf < minScore) continue;
+
+    // Extract bbox (cx, cy, w, h) — normalized to 0–1 by the processor
+    let cx, cy, w, h: number;
+    if (transposed) {
+      cx = data[0 * anchors + a];
+      cy = data[1 * anchors + a];
+      w = data[2 * anchors + a];
+      h = data[3 * anchors + a];
+    } else {
+      cx = data[a * features + 0];
+      cy = data[a * features + 1];
+      w = data[a * features + 2];
+      h = data[a * features + 3];
+    }
+
+    // Extract 17 keypoints (each 3 values: x, y, score)
+    const keypoints: PoseKeypoint[] = [];
+    for (let kp = 0; kp < numKp; kp++) {
+      const kpOffset = 5 + kp * 3; // after bbox(4) + conf(1)
+      let kx, ky, ks: number;
+      if (transposed) {
+        kx = data[kpOffset * anchors + a];
+        ky = data[(kpOffset + 1) * anchors + a];
+        ks = data[(kpOffset + 2) * anchors + a];
+      } else {
+        kx = data[a * features + kpOffset];
+        ky = data[a * features + kpOffset + 1];
+        ks = data[a * features + kpOffset + 2];
+      }
+      // Keypoints are in pixel coords of the 640×640 input — normalize to 0–1
+      // relative to the original image
+      keypoints.push({
+        name: COCO_KEYPOINT_NAMES[kp] ?? `kp_${kp}`,
+        x: kx / imgWidth,
+        y: ky / imgHeight,
+        score: ks,
+      });
+    }
+
+    persons.push({
+      score: conf,
+      keypoints,
+      bbox: { x: cx, y: cy, w, h },
+    });
+  }
+
+  // Sort by confidence (highest first)
+  persons.sort((a, b) => b.score - a.score);
+  return { persons };
+}
 
 const MODEL_LOAD_TIMEOUT_MS = 60_000;
 
@@ -254,11 +309,8 @@ export function usePoseDetection() {
   const [modelStatus, setModelStatus] = useState<ModelStatus>("idle");
   const [modelProgress, setModelProgress] = useState(0);
   const [activeModelId, setActiveModelId] = useState<DetectionModelId | null>(null);
-  // Re-render when cache changes (single source of truth)
   const [, forceRerender] = useState(0);
 
-  // Subscribe to model cache changes so the UI updates immediately when a
-  // model finishes downloading.
   const listenerRef = useRef<ModelCacheListener | null>(null);
   if (!listenerRef.current) {
     listenerRef.current = () => forceRerender((n) => n + 1);
@@ -276,9 +328,8 @@ export function usePoseDetection() {
       setModelStatus("loading");
       setModelProgress(0);
       try {
-        // Race the model load against a timeout so the UI never hangs forever.
-        const pipe = await Promise.race([
-          getPipeline(modelId, (p) => setModelProgress(p)),
+        const { model, processor } = await Promise.race([
+          getModelAndProcessor(modelId, (p) => setModelProgress(p)),
           new Promise<never>((_, reject) =>
             setTimeout(
               () => reject(new Error("Model is taking too long to load (over 60s). Check your connection or skip validation.")),
@@ -289,14 +340,48 @@ export function usePoseDetection() {
         setModelStatus("ready");
         setModelProgress(1);
 
+        // Load the image via RawImage (transformers.js helper)
+        const { RawImage } = transformersModule!;
+        const image = await RawImage.fromURL(imageDataUrl);
+
         const inferStart = Date.now();
-        // `object-detection` pipeline returns an array of detections.
-        // Each detection: { label: "person", score: 0.95, bbox: {xmin,ymin,xmax,ymax}, keypoints: [[x,y,s], ...] }
-        // YOLOv8-pose models include `keypoints` on each detection object.
-        const output = await pipe(imageDataUrl, { threshold: minScore });
-        const detections = Array.isArray(output) ? output : [output];
-        const persons = detections.filter(
-          (d: any) => d.label === "person" && d.score >= minScore,
+        // Preprocess the image → input tensors
+        const inputs = await processor(image);
+
+        // The YOLOv8 model expects an input key called `images`, but the
+        // processor outputs `pixel_values`. Remap so the model finds its input.
+        // (This is the fix for "Missing the following inputs: images".)
+        const modelInputs: Record<string, any> = {};
+        if (inputs.pixel_values !== undefined) {
+          modelInputs.images = inputs.pixel_values;
+        }
+        // Copy any other inputs the model might need (e.g., orig_target_sizes)
+        for (const [key, value] of Object.entries(inputs)) {
+          if (key !== "pixel_values" && key !== "images") {
+            modelInputs[key] = value;
+          }
+        }
+        // If the model also needs orig_target_sizes (some YOLOv8 variants do),
+        // pass the image dimensions
+        if (!modelInputs.orig_target_sizes && inputs.reshaped_input_sizes) {
+          modelInputs.orig_target_sizes = inputs.reshaped_input_sizes;
+        }
+
+        // Run the model forward pass
+        const outputs = await model(modelInputs);
+
+        // YOLOv8-pose output is typically `output0` (the main detection tensor)
+        const outputTensor = outputs.output0 ?? outputs.output ?? outputs[Object.keys(outputs)[0]];
+        if (!outputTensor) {
+          throw new Error("Model output missing detection tensor");
+        }
+
+        // Parse the raw YOLOv8 output into persons + keypoints
+        const { persons } = parseYolov8PoseOutput(
+          outputTensor,
+          minScore,
+          image.width,
+          image.height,
         );
 
         logger.model(`Detection complete: ${modelId}`, {
@@ -307,29 +392,10 @@ export function usePoseDetection() {
         if (persons.length === 0) return { kind: "no-person", score: 0 };
         if (persons.length > 1) return { kind: "multi-person", personCount: persons.length, score: persons[0].score };
 
-        // Single person — extract keypoints from the detection object.
-        // YOLOv8-pose returns keypoints as [[x, y, score], ...] (17 COCO keypoints)
-        const kpsRaw: any[] = persons[0]?.keypoints ?? [];
-        const keypoints: PoseKeypoint[] = kpsRaw.map((kp: any, i: number) => {
-          // Handle both [x, y, score] array format and {x, y, score} object format
-          if (Array.isArray(kp)) {
-            return {
-              name: COCO_KEYPOINT_NAMES[i] ?? `kp_${i}`,
-              x: kp[0],
-              y: kp[1],
-              score: kp[2],
-            };
-          }
-          return {
-            name: COCO_KEYPOINT_NAMES[i] ?? `kp_${i}`,
-            x: kp.x ?? 0,
-            y: kp.y ?? 0,
-            score: kp.score ?? 0,
-          };
-        });
-        lastKeyedRef.current = keypoints;
-
-        return { kind: "ok", personCount: 1, score: persons[0].score, keypoints };
+        // Single person — use the top detection
+        const person = persons[0];
+        lastKeyedRef.current = person.keypoints;
+        return { kind: "ok", personCount: 1, score: person.score, keypoints: person.keypoints };
       } catch (e) {
         setModelStatus("error");
         logger.model(`Detection failed: ${modelId}`, {
@@ -388,14 +454,6 @@ export function usePoseDetection() {
     [],
   );
 
-  /**
-   * Preloads a model without running detection. Used by the Settings page +
-   * camera page to download models in advance.
-   *
-   * Returns true on success, false on failure (error is also logged).
-   * The `loadedModels` set + `notifyModelCacheChange` ensure every subscribed
-   * component re-renders immediately when the download completes.
-   */
   const preloadModel = useCallback(
     async (modelId: DetectionModelId): Promise<boolean> => {
       if (loadedModels.has(modelId)) {
@@ -406,10 +464,9 @@ export function usePoseDetection() {
       setModelStatus("loading");
       setModelProgress(0);
       try {
-        await getPipeline(modelId, (p) => setModelProgress(p));
+        await getModelAndProcessor(modelId, (p) => setModelProgress(p));
         setModelStatus("ready");
         setModelProgress(1);
-        // getPipeline already called notifyModelCacheChange + added to loadedModels
         return true;
       } catch (e) {
         setModelStatus("error");
@@ -428,7 +485,6 @@ export function usePoseDetection() {
     modelStatus,
     modelProgress,
     activeModelId,
-    /** Returns true if the model is already downloaded + cached in memory. */
     isModelCached: (modelId: DetectionModelId) => loadedModels.has(modelId),
   };
 }

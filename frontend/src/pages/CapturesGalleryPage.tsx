@@ -120,11 +120,6 @@ export function CapturesGalleryPage() {
       <GlobalHeader
         title="Captures gallery"
         subtitle={`${savedImages.length} saved ${savedImages.length === 1 ? "image" : "images"} · skips pose validation`}
-        rightSlot={
-          <div className="relative">
-            <AddCapturePanel />
-          </div>
-        }
       />
 
       <main className="flex-1 px-3 sm:px-6 lg:px-10 py-4 sm:py-6">
@@ -132,7 +127,9 @@ export function CapturesGalleryPage() {
           <EmptyState onOpenCamera={goToCamera} />
         ) : (
           <>
-            {/* Toolbar */}
+            {/* Toolbar — Add Image button is now beside Camera (in the page
+                body, not the header). The AddCapturePanel modal opens as an
+                overlay (fixed position) so it doesn't push page content. */}
             <div className="mb-4 sm:mb-6 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-border/60 bg-card p-3 sm:p-4">
               <div className="flex items-center gap-2 min-w-0">
                 <ImageIcon className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -186,6 +183,9 @@ export function CapturesGalleryPage() {
                     >
                       <CheckSquare className="h-3.5 w-3.5" /> Select
                     </Button>
+                    {/* Add Image button — beside Camera, in the page body.
+                        The AddCapturePanel modal opens as a fixed overlay. */}
+                    <AddCapturePanel />
                     <Button variant="outline" size="sm" onClick={goToCamera} className="h-9 gap-1.5 text-xs">
                       <Camera className="h-3.5 w-3.5" /> Camera
                     </Button>
@@ -309,12 +309,15 @@ function EmptyState({ onOpenCamera }: { onOpenCamera: () => void }) {
       </div>
       <h2 className="font-display text-2xl font-medium">No saved captures yet</h2>
       <p className="text-sm text-muted-foreground mt-3 leading-relaxed">
-        Capture a photo with the camera, or use &ldquo;Add image&rdquo; at the top-right to upload
-        from your device or paste a URL. Saved images skip pose validation.
+        Capture a photo with the camera, or use the &ldquo;Add image&rdquo; button in the toolbar
+        to upload from your device or paste a URL. Saved images skip pose validation.
       </p>
-      <Button onClick={onOpenCamera} className="mt-6 gap-2">
-        <Camera className="h-4 w-4" /> Open camera
-      </Button>
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+        <Button onClick={onOpenCamera} className="gap-2">
+          <Camera className="h-4 w-4" /> Open camera
+        </Button>
+        <AddCapturePanel />
+      </div>
     </div>
   );
 }

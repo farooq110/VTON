@@ -12,9 +12,13 @@ import { canAccessSettings } from "@/types";
  *   - Back arrow (navigates to backTo or history back)
  *   - Title + subtitle
  *   - Right slot for buttons
- *   - Hamburger menu button (visible on ALL screen sizes) → slide-down nav
+ *   - Hamburger menu button (visible on ALL screen sizes) → OVERLAY nav
  *   - Nav entries: Home, Collection, Camera, Gallery, New arrivals, Settings, Sign out
  *   - Role-aware: public_user sees no Settings + no Sign out
+ *
+ * **Menu behavior:** The slide-down nav panel is `absolute top-full` positioned
+ * (overlay) so it doesn't push the page content down. A transparent backdrop
+ * closes the menu on outside click. Same pattern as the HomePage header.
  */
 interface GlobalHeaderProps {
   title: string;
@@ -61,7 +65,7 @@ export function GlobalHeader({ title, subtitle, showBack = true, backTo, rightSl
   const isActive = (path: string) => location.pathname === path;
 
   return (
-    <header className="sticky top-0 z-40 glass border-b border-border/60">
+    <header className="relative sticky top-0 z-40 glass border-b border-border/60">
       <div className="px-3 sm:px-6 lg:px-10 py-3 sm:py-4 flex items-center gap-2 sm:gap-3">
         {showBack && (
           <button
@@ -99,37 +103,45 @@ export function GlobalHeader({ title, subtitle, showBack = true, backTo, rightSl
         </button>
       </div>
 
-      {/* Slide-down nav panel */}
+      {/* Slide-down nav panel — OVERLAY (absolute positioned so it doesn't
+          push the page content below). Closes on any navigation action. */}
       <AnimatePresence>
         {menuOpen && (
-          <motion.nav
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            className="overflow-hidden border-t border-border/40 bg-card"
-          >
-            <div className="px-3 sm:px-6 lg:px-10 py-2 grid grid-cols-1 gap-1">
-              <MenuBtn icon={<HomeIcon className="h-4 w-4" />} label="Home" active={isActive("/home")} onClick={() => nav("/home")} />
-              <MenuBtn icon={<Shirt className="h-4 w-4" />} label="Collection" active={isActive("/products")} onClick={() => nav("/products")} />
-              <MenuBtn icon={<CameraIcon className="h-4 w-4" />} label="Try-on camera" active={isActive("/tryon/camera")} onClick={() => nav("/tryon/camera")} />
-              <MenuBtn icon={<ImageIcon className="h-4 w-4" />} label="Captures gallery" active={isActive("/captures-gallery")} onClick={() => nav("/captures-gallery")} />
-              <MenuBtn icon={<Sparkles className="h-4 w-4" />} label="Try-on results" active={isActive("/tryon-results")} onClick={() => nav("/tryon-results")} />
-              <MenuBtn icon={<Tag className="h-4 w-4" />} label="New arrivals" active={isActive("/new-arrivals")} onClick={() => nav("/new-arrivals")} />
-              {showSettings && (
-                <MenuBtn icon={<SettingsIcon className="h-4 w-4" />} label="Settings" active={isActive("/settings")} onClick={() => nav("/settings")} />
-              )}
-              {!isPublicUser && (
-                <button
-                  onClick={handleSignOut}
-                  className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition hover:bg-destructive/10 text-destructive"
-                >
-                  <LogOut className="h-4 w-4" />
-                  <span>Sign out</span>
-                </button>
-              )}
-            </div>
-          </motion.nav>
+          <>
+            {/* Transparent backdrop — click anywhere to close */}
+            <div
+              className="fixed inset-0 z-40"
+              onClick={() => setMenuOpen(false)}
+            />
+            <motion.nav
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+              className="absolute top-full left-0 right-0 z-50 overflow-hidden border-t border-border/40 bg-card shadow-elevated"
+            >
+              <div className="px-3 sm:px-6 lg:px-10 py-2 grid grid-cols-1 gap-1">
+                <MenuBtn icon={<HomeIcon className="h-4 w-4" />} label="Home" active={isActive("/home")} onClick={() => nav("/home")} />
+                <MenuBtn icon={<Shirt className="h-4 w-4" />} label="Collection" active={isActive("/products")} onClick={() => nav("/products")} />
+                <MenuBtn icon={<CameraIcon className="h-4 w-4" />} label="Try-on camera" active={isActive("/tryon/camera")} onClick={() => nav("/tryon/camera")} />
+                <MenuBtn icon={<ImageIcon className="h-4 w-4" />} label="Captures gallery" active={isActive("/captures-gallery")} onClick={() => nav("/captures-gallery")} />
+                <MenuBtn icon={<Sparkles className="h-4 w-4" />} label="Try-on results" active={isActive("/tryon-results")} onClick={() => nav("/tryon-results")} />
+                <MenuBtn icon={<Tag className="h-4 w-4" />} label="New arrivals" active={isActive("/new-arrivals")} onClick={() => nav("/new-arrivals")} />
+                {showSettings && (
+                  <MenuBtn icon={<SettingsIcon className="h-4 w-4" />} label="Settings" active={isActive("/settings")} onClick={() => nav("/settings")} />
+                )}
+                {!isPublicUser && (
+                  <button
+                    onClick={handleSignOut}
+                    className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition hover:bg-destructive/10 text-destructive"
+                  >
+                    <LogOut className="h-4 w-4" />
+                    <span>Sign out</span>
+                  </button>
+                )}
+              </div>
+            </motion.nav>
+          </>
         )}
       </AnimatePresence>
     </header>
