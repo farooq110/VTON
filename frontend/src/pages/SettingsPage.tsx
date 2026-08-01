@@ -1,9 +1,9 @@
-import { AlertCircle, CheckCircle2, Download, Loader2, Palette, RotateCcw, Save, Scan, Shield, Target, Image as ImageIcon } from "lucide-react";
+import { AlertCircle, CheckCircle2, Download, Loader2, Palette, RotateCcw, Save, Scan, Shield, Target, Trash2, Image as ImageIcon, HardDrive } from "lucide-react";
 import { useRef, useState } from "react";
 import { useAuthStore } from "@/lib/store";
 import { DETECTION_MODELS } from "@/lib/constants";
 import { canManageBrand, canManageFeatures, ROLE_LABELS } from "@/types";
-import type { DetectionModel, DetectionModelId, ImageCompressionSettings, PoseThresholds, TryOnSettings } from "@/types";
+import type { DetectionModel, DetectionModelId, ImageCompressionSettings, PersonDetectionParams, PoseThresholds, TryOnSettings } from "@/types";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { logger } from "@/lib/logger";
 import { useToast } from "@/components/ui/toast";
@@ -16,34 +16,35 @@ import { Button } from "@/components/ui/button";
  * SettingsPage — control panel for brand identity, detection models, posture
  * thresholds, image compression, capture timer, and debug/telemetry.
  *
- * **Save button behavior:**
- *   - The Save button is DISABLED by default.
- *   - It becomes ENABLED only when the user changes a setting (dirty state).
- *   - On save click: shows a toast, marks the settings as saved, and DISABLES
- *     the button again. Does NOT navigate away from the page.
+ * ─── NEW MODEL ARCHITECTURE ─────────────────────────────────────────────
+ * The settings page now has THREE separate model-related sections:
  *
- * **Model download behavior:**
- *   - Models do NOT auto-download. The user must click "Download now" manually.
- *   - After download, the button shows "Downloaded" (disabled, green check).
- *   - If the user tries to capture/upload without the model downloaded, a
- *     beautiful popup appears: "Download the model first".
+ *   1. MODEL DOWNLOADS (top, shared) — lists every available model with a
+ *      Download / Uninstall button. Downloading a model here makes it
+ *      available for BOTH person detection AND posture estimation. The
+ *      download state is PERSISTENT (survives page refresh) via the
+ *      model-persistence layer.
  *
- * **TryOn AI endpoint:**
- *   - Removed from the UI — the backend proxy `/api/tryon/run` handles the
- *     AI call with server-side credentials. No API keys on the client.
+ *   2. PERSON DETECTION MODEL (Stage 1) — select which downloaded model to
+ *      use for person detection, plus its own tuning parameters
+ *      (confidence threshold, NMS IoU, max persons). Click anywhere on a
+ *      model's card to select it.
+ *
+ *   3. POSTURE ESTIMATION MODEL (Stage 3) — select which downloaded model
+ *      to use for posture checks, plus the pose thresholds (shoulder tilt,
+ *      face yaw, etc.). Click anywhere on a model's card to select it.
+ *
+ * Both selection sections draw from the SAME list of models, and both can
+ * pick the same or different models. The download is shared.
  */
 export function SettingsPage() {
   const { settings, updateSettings, resetSettings, user } = useAuthStore();
   const userRole = user?.role;
   const { toast } = useToast();
-  const { isModelCached } = usePoseDetection();
 
   const canBrand = canManageBrand(userRole);
   const canFeatures = canManageFeatures(userRole);
 
-  // ─── Dirty-state tracking for the Save button ──────────────────────────
-  // Snapshot the settings when the page loads. Compare current settings to
-  // the snapshot to determine if there are unsaved changes.
   const savedSnapshotRef = useRef<TryOnSettings>(structuredClone(settings));
   const [saved, setSaved] = useState(true);
 
@@ -52,18 +53,19 @@ export function SettingsPage() {
   const handleUpdate = (patch: Partial<TryOnSettings>) => {
     updateSettings(patch);
     setSaved(false);
+    logger.interaction(`Setting changed: ${Object.keys(patch).join(", ")}`, {
+      component: "SettingsPage",
+      detail: JSON.stringify(patch).slice(0, 120),
+    });
   };
 
   const handleReset = () => {
+    logger.interaction("Reset settings clicked", { component: "SettingsPage" });
     resetSettings();
-    // After reset, the settings differ from the snapshot → dirty
     setTimeout(() => setSaved(false), 0);
   };
 
   const handleSave = () => {
-    // Zustand-persist already wrote to localStorage on every updateSettings
-    // call. This button is just a UX confirmation — update the snapshot and
-    // show a toast.
     savedSnapshotRef.current = structuredClone(useAuthStore.getState().settings);
     setSaved(true);
     logger.settings("Settings saved");
@@ -74,6 +76,8 @@ export function SettingsPage() {
     handleUpdate({ poseThresholds: { ...settings.poseThresholds, ...patch } });
   const setCompression = (patch: Partial<ImageCompressionSettings>) =>
     handleUpdate({ compression: { ...settings.compression, ...patch } });
+  const setPersonParams = (patch: Partial<PersonDetectionParams>) =>
+    handleUpdate({ personDetectionParams: { ...settings.personDetectionParams, ...patch } });
 
   const roleLabel = userRole ? ROLE_LABELS[userRole] : "";
   const subtitle = canBrand && canFeatures
@@ -129,7 +133,7 @@ export function SettingsPage() {
             </section>
           )}
 
-          {/* Theme — manager-only (same RBAC gate as brand identity) */}
+          {/* Theme — manager-only */}
           {canBrand && (
             <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
               <div className="flex items-center gap-2">
@@ -145,40 +149,103 @@ export function SettingsPage() {
             </section>
           )}
 
-          {/* ─── Person detection model ───────────────────────────────────
-              This model detects HOW MANY people are in the frame (0, 1, or >1)
-              and returns their bounding boxes. It's the first stage of the
-              try-on validation pipeline. */}
+          {/* ─── MODEL DOWNLOADS (shared, top of feature settings) ───────
+              This section lists every available model with a Download /
+              Uninstall button. Downloading a model here makes it available
+              for BOTH the person-detection section AND the posture-estimation
+              section below — the download is shared.
+
+              The download state is PERSISTENT (survives page refresh) via
+              the model-persistence layer (localStorage + Cache Storage
+              verification). */}
           {canFeatures && (
             <section className="rounded-2xl bg-card border border-border p-6">
               <div className="flex items-center gap-2 mb-3">
-                <Scan className="h-5 w-5 text-accent" />
+                <HardDrive className="h-5 w-5 text-accent" />
                 <div>
-                  <h2 className="font-display text-lg">Person detection model</h2>
+                  <h2 className="font-display text-lg">Model downloads</h2>
                   <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Detects how many people are in the camera frame (Stage 1). Rejects 0 persons or multiple persons. Models are <strong>not</strong> auto-downloaded — click &quot;Download now&quot; to fetch the weights (one-time, ~3 MB).
+                    Download model weights once — they&apos;re cached in your browser and <strong>survive page refreshes</strong>. Each downloaded model becomes available for both person detection (Stage 1) and posture estimation (Stage 3). Use <strong>Uninstall</strong> to remove a model and free up space.
                   </p>
                 </div>
               </div>
               <div className="space-y-2">
                 {DETECTION_MODELS.map((m) => (
-                  <ModelOption
-                    key={m.id}
-                    model={m}
-                    isActive={settings.activeModelId === m.id}
-                    onSelect={() => handleUpdate({ activeModelId: m.id as DetectionModelId })}
-                  />
+                  <ModelDownloadRow key={m.id} model={m} />
                 ))}
               </div>
             </section>
           )}
 
-          {/* ─── Posture estimation model ────────────────────────────────
-              This model checks the user's pose (shoulders straight, face
-              forward, full body visible). It uses the SAME model as person
-              detection (YOLOv8-pose returns both bounding boxes AND 17 COCO
-              keypoints), so it shares the download above — no separate
-              download needed. */}
+          {/* ─── PERSON DETECTION MODEL (Stage 1) ─────────────────────────
+              Select which downloaded model to use for person detection.
+              Click anywhere on the card to select it (not just the radio).
+              Has its OWN tuning parameters below the selection. */}
+          {canFeatures && (
+            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
+              <div className="flex items-center gap-2">
+                <Scan className="h-5 w-5 text-accent" />
+                <div>
+                  <h2 className="font-display text-lg">Person detection model</h2>
+                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
+                    Stage 1 — detects how many people are in the camera frame. Rejects 0 persons or multiple persons. Pick any downloaded model below; its parameters are configured in the section underneath.
+                  </p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {DETECTION_MODELS.map((m) => (
+                  <SelectableModelCard
+                    key={m.id}
+                    model={m}
+                    isActive={settings.personDetectionModelId === m.id}
+                    onSelect={() => {
+                      handleUpdate({ personDetectionModelId: m.id as DetectionModelId });
+                      logger.interaction(`Person-detection model selected: ${m.name}`, {
+                        component: "PersonDetectionSection",
+                      });
+                    }}
+                  />
+                ))}
+              </div>
+
+              {/* Person-detection-specific parameters */}
+              <div className="rounded-lg border border-border/60 bg-muted/30 p-4 space-y-3">
+                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  Person detection parameters
+                </p>
+                <NumberField
+                  label="Confidence threshold (0–1)"
+                  value={settings.personDetectionParams.confidenceThreshold}
+                  step={0.05}
+                  min={0.3}
+                  max={0.95}
+                  onChange={(v) => setPersonParams({ confidenceThreshold: v })}
+                />
+                <NumberField
+                  label="NMS IoU threshold (0–1)"
+                  value={settings.personDetectionParams.nmsIouThreshold}
+                  step={0.05}
+                  min={0.1}
+                  max={0.9}
+                  onChange={(v) => setPersonParams({ nmsIouThreshold: v })}
+                />
+                <NumberField
+                  label="Max persons returned"
+                  value={settings.personDetectionParams.maxPersons}
+                  step={1}
+                  min={1}
+                  max={50}
+                  onChange={(v) => setPersonParams({ maxPersons: v })}
+                />
+              </div>
+            </section>
+          )}
+
+          {/* ─── POSTURE ESTIMATION MODEL (Stage 3) ──────────────────────
+              Select which downloaded model to use for posture checks.
+              Independent from the person-detection model — you can use
+              YOLOv8n for detection and YOLOv8s for posture, or any
+              combination. Has its OWN threshold parameters below. */}
           {canFeatures && (
             <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
               <div className="flex items-center gap-2">
@@ -186,20 +253,36 @@ export function SettingsPage() {
                 <div>
                   <h2 className="font-display text-lg">Posture estimation model</h2>
                   <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Checks the user&apos;s posture (Stage 3) — shoulder tilt, face yaw/pitch, body visibility. Uses the same model as person detection above (YOLOv8-pose returns both bounding boxes AND keypoints), so no separate download is needed.
+                    Stage 3 — checks the user&apos;s posture (shoulder tilt, face yaw/pitch, body visibility). Independent from the person-detection model above; pick any downloaded model.
                   </p>
                 </div>
               </div>
-              <div className="rounded-lg border border-border/60 bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
-                <strong>Active model:</strong> {DETECTION_MODELS.find((m) => m.id === settings.activeModelId)?.name ?? settings.activeModelId}
-                <br />
-                <strong>Downloaded:</strong> {isModelCached(settings.activeModelId) ? "Yes ✓" : "No — download above"}
+              <div className="space-y-2">
+                {DETECTION_MODELS.map((m) => (
+                  <SelectableModelCard
+                    key={m.id}
+                    model={m}
+                    isActive={settings.postureModelId === m.id}
+                    onSelect={() => {
+                      handleUpdate({ postureModelId: m.id as DetectionModelId });
+                      logger.interaction(`Posture model selected: ${m.name}`, {
+                        component: "PostureSection",
+                      });
+                    }}
+                  />
+                ))}
               </div>
-              <NumberField label="Person confidence (0–1)" value={settings.poseThresholds.personScore} step={0.05} min={0.3} max={0.95} onChange={(v) => setThresholds({ personScore: v })} />
-              <NumberField label="Shoulder tilt (deg)" value={settings.poseThresholds.shoulderTiltDeg} step={1} min={0} max={30} onChange={(v) => setThresholds({ shoulderTiltDeg: v })} />
-              <NumberField label="Face yaw (deg)" value={settings.poseThresholds.faceYawDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ faceYawDeg: v })} />
-              <NumberField label="Face pitch (deg)" value={settings.poseThresholds.facePitchDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ facePitchDeg: v })} />
-              <NumberField label="Body visibility (0–1)" value={settings.poseThresholds.minBodyVisibility} step={0.05} min={0.3} max={0.95} onChange={(v) => setThresholds({ minBodyVisibility: v })} />
+
+              {/* Posture thresholds */}
+              <div className="rounded-lg border border-border/60 bg-muted/30 p-4 space-y-3">
+                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  Posture thresholds
+                </p>
+                <NumberField label="Shoulder tilt (deg)" value={settings.poseThresholds.shoulderTiltDeg} step={1} min={0} max={30} onChange={(v) => setThresholds({ shoulderTiltDeg: v })} />
+                <NumberField label="Face yaw (deg)" value={settings.poseThresholds.faceYawDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ faceYawDeg: v })} />
+                <NumberField label="Face pitch (deg)" value={settings.poseThresholds.facePitchDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ facePitchDeg: v })} />
+                <NumberField label="Body visibility (0–1)" value={settings.poseThresholds.minBodyVisibility} step={0.05} min={0.3} max={0.95} onChange={(v) => setThresholds({ minBodyVisibility: v })} />
+              </div>
             </section>
           )}
 
@@ -227,7 +310,7 @@ export function SettingsPage() {
             </section>
           )}
 
-          {/* Capture (no AI endpoint — handled by backend) */}
+          {/* Capture */}
           {canFeatures && (
             <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
               <div>
@@ -249,21 +332,21 @@ export function SettingsPage() {
                 <div>
                   <h2 className="font-display text-lg">Debug &amp; telemetry</h2>
                   <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Turn on detailed event logging (camera, capture, try-on, network) for troubleshooting. Only visible to managers and developers — not shown to public users. Error-level logs can also be sent to the backend for remote diagnostics.
+                    Turn on detailed event logging (navigation, interactions, camera, capture, try-on, network) for troubleshooting. Only visible to managers and developers. Error logs include actionable fix tips. Error-level logs can also be sent to the backend for remote diagnostics.
                   </p>
                 </div>
               </div>
               <label className="flex items-center justify-between">
                 <div>
                   <span className="text-sm font-medium">Enable debug logging</span>
-                  <p className="text-xs text-muted-foreground mt-0.5">Shows the Activity overlay (bottom-right). Logs camera, capture, try-on, and network events.</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">Shows the Activity overlay (bottom-right). Logs navigation, interactions, camera, capture, try-on, and network events.</p>
                 </div>
                 <input type="checkbox" checked={settings.debugLogging} onChange={(e) => handleUpdate({ debugLogging: e.target.checked })} />
               </label>
               <label className="flex items-center justify-between">
                 <div>
                   <span className="text-sm font-medium">Send error telemetry to backend</span>
-                  <p className="text-xs text-muted-foreground mt-0.5">When ON, error-level logs are POSTed to <code className="font-mono text-[10px]">/api/telemetry</code> (fire-and-forget) so the server can track client-side failures.</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">When ON, error-level logs (with fix tips) are POSTed to <code className="font-mono text-[10px]">/api/telemetry</code> (fire-and-forget).</p>
                 </div>
                 <input type="checkbox" checked={settings.telemetryEnabled} onChange={(e) => handleUpdate({ telemetryEnabled: e.target.checked })} />
               </label>
@@ -321,15 +404,117 @@ function NumberField({ label, value, step, min, max, onChange }: { label: string
 }
 
 /**
- * ModelOption — a single detection model card with download status.
+ * ModelDownloadRow — a single model in the shared "Model downloads" section.
  *
- * Download behavior:
- *   - Models do NOT auto-download. User must click "Download now".
- *   - After successful download, shows "Downloaded" badge (green, disabled button).
- *   - If download fails, shows an error badge + retries on next click.
- *   - Download progress bar appears during active download.
+ * Shows the model name, size, and a Download / Uninstall button. The
+ * download state is read from the persistence layer (survives page refresh).
+ * Uninstall removes the model from the browser's Cache Storage.
+ *
+ * This row does NOT select the model for any stage — it only manages the
+ * download. Selection happens in the SelectableModelCard components below.
  */
-function ModelOption({
+function ModelDownloadRow({ model }: { model: DetectionModel }) {
+  const { isModelCached, preloadModel, uninstallModel, modelStatus, modelProgress, activeModelId } = usePoseDetection();
+  const [downloading, setDownloading] = useState(false);
+  const [uninstalling, setUninstalling] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const cached = isModelCached(model.id);
+  const isThisDownloading = downloading || (activeModelId === model.id && modelStatus === "loading");
+
+  const handleDownload = async () => {
+    logger.interaction(`Download model clicked: ${model.name}`, { component: "ModelDownloadRow" });
+    setDownloading(true);
+    setDownloadError(null);
+    const ok = await preloadModel(model.id);
+    setDownloading(false);
+    if (ok) {
+      logger.settings(`Model downloaded: ${model.id}`);
+    } else {
+      const msg = "Download failed — check your network connection and try again.";
+      setDownloadError(msg);
+    }
+  };
+
+  const handleUninstall = async () => {
+    logger.interaction(`Uninstall model clicked: ${model.name}`, { component: "ModelDownloadRow" });
+    setUninstalling(true);
+    await uninstallModel(model.id);
+    setUninstalling(false);
+  };
+
+  return (
+    <div className="w-full text-left rounded-xl border border-border p-4 flex items-start justify-between gap-3">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-display text-sm font-medium">{model.name}</span>
+          {model.recommended && (
+            <span className="text-accent text-[10px] uppercase tracking-wider bg-accent/10 px-1.5 py-0.5 rounded">Recommended</span>
+          )}
+          {cached ? (
+            <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-green-600 bg-green-500/10 px-1.5 py-0.5 rounded">
+              <CheckCircle2 className="h-3 w-3" /> Downloaded
+            </span>
+          ) : isThisDownloading ? (
+            <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-blue-600 bg-blue-500/10 px-1.5 py-0.5 rounded">
+              <Loader2 className="h-3 w-3 animate-spin" /> {Math.round(modelProgress * 100)}%
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+              <Download className="h-3 w-3" /> {model.sizeMb} MB
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-1">{model.description}</p>
+        <p className="text-[11px] text-muted-foreground mt-2 font-mono">~{model.speedMs}ms · {model.accuracy}</p>
+
+        {isThisDownloading && (
+          <div className="mt-2 h-1.5 rounded-full bg-muted overflow-hidden">
+            <div className="h-full bg-blue-500 transition-all" style={{ width: `${Math.round(modelProgress * 100)}%` }} />
+          </div>
+        )}
+        {downloadError && !isThisDownloading && (
+          <p className="mt-2 text-[11px] text-red-600 leading-relaxed">{downloadError}</p>
+        )}
+      </div>
+
+      <div className="shrink-0 flex flex-col gap-1.5">
+        {!cached && !isThisDownloading && (
+          <button
+            onClick={handleDownload}
+            className="inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-700 font-medium px-3 py-1.5 rounded-lg border border-blue-200 hover:bg-blue-50 transition"
+          >
+            <Download className="h-3.5 w-3.5" /> Download
+          </button>
+        )}
+        {cached && (
+          <button
+            onClick={handleUninstall}
+            disabled={uninstalling}
+            className="inline-flex items-center gap-1.5 text-xs text-red-600 hover:text-red-700 font-medium px-3 py-1.5 rounded-lg border border-red-200 hover:bg-red-50 transition disabled:opacity-50"
+          >
+            {uninstalling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            {uninstalling ? "Removing…" : "Uninstall"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * SelectableModelCard — a model card used in the person-detection and
+ * posture-estimation selection sections.
+ *
+ * CLICK-ANYWHERE-TO-SELECT: the entire card is a button that calls onSelect.
+ * There's no separate radio button to click — the whole card is the target.
+ * The visual radio indicator on the right is just a status display, not an
+ * interactive element.
+ *
+ * Shows a "Download first" hint if the model isn't downloaded yet, but
+ * still allows selection (the download will happen automatically on first
+ * use, or the user can download it from the "Model downloads" section above).
+ */
+function SelectableModelCard({
   model,
   isActive,
   onSelect,
@@ -338,93 +523,51 @@ function ModelOption({
   isActive: boolean;
   onSelect: () => void;
 }) {
-  const { isModelCached, preloadModel, modelStatus, modelProgress, activeModelId } = usePoseDetection();
-  const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const { isModelCached } = usePoseDetection();
   const cached = isModelCached(model.id);
-  const isThisDownloading = downloading || (activeModelId === model.id && modelStatus === "loading");
-
-  const handleDownload = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setDownloading(true);
-    setDownloadError(null);
-    logger.settings(`Downloading model: ${model.id}`);
-    // preloadModel returns true on success, false on failure (no throw).
-    const ok = await preloadModel(model.id);
-    setDownloading(false);
-    if (ok) {
-      logger.settings(`Model downloaded successfully: ${model.id}`);
-    } else {
-      const msg = "Download failed — check your network connection and try again.";
-      setDownloadError(msg);
-      logger.settings(`Model download failed: ${model.id}`, { detail: msg, level: "error" });
-    }
-  };
 
   return (
-    <div
-      className={`w-full text-left rounded-xl border p-4 transition ${isActive ? "border-primary bg-primary/5" : "border-border hover:border-border/80"}`}
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`w-full text-left rounded-xl border p-4 transition cursor-pointer ${
+        isActive
+          ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+          : "border-border hover:border-foreground/30 hover:bg-muted/30"
+      }`}
+      aria-pressed={isActive}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={onSelect} className="font-display text-sm font-medium text-left">
-              {model.name}
-            </button>
+            <span className="font-display text-sm font-medium">{model.name}</span>
             {model.recommended && (
               <span className="text-accent text-[10px] uppercase tracking-wider bg-accent/10 px-1.5 py-0.5 rounded">Recommended</span>
             )}
-            {/* Download status badge */}
             {cached ? (
               <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-green-600 bg-green-500/10 px-1.5 py-0.5 rounded">
-                <CheckCircle2 className="h-3 w-3" /> Downloaded
-              </span>
-            ) : isThisDownloading ? (
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-blue-600 bg-blue-500/10 px-1.5 py-0.5 rounded">
-                <Loader2 className="h-3 w-3 animate-spin" /> Downloading {Math.round(modelProgress * 100)}%
-              </span>
-            ) : downloadError ? (
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-red-600 bg-red-500/10 px-1.5 py-0.5 rounded">
-                Download failed
+                <CheckCircle2 className="h-3 w-3" /> Ready
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-                <Download className="h-3 w-3" /> Not downloaded ({model.sizeMb} MB)
+              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-amber-600 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                <Download className="h-3 w-3" /> Download first
               </span>
             )}
-            {/* Active selection radio */}
-            <button
-              onClick={onSelect}
-              className={`h-5 w-5 rounded-full border-2 shrink-0 ${isActive ? "border-primary bg-primary" : "border-border"}`}
-              aria-label="Select model"
-            />
           </div>
           <p className="text-xs text-muted-foreground mt-1">{model.description}</p>
-          <p className="text-[11px] text-muted-foreground mt-2 font-mono">~{model.speedMs}ms inference · {model.accuracy} accuracy</p>
-
-          {/* Download progress bar */}
-          {isThisDownloading && (
-            <div className="mt-2 h-1.5 rounded-full bg-muted overflow-hidden">
-              <div className="h-full bg-blue-500 transition-all" style={{ width: `${Math.round(modelProgress * 100)}%` }} />
-            </div>
-          )}
-
-          {/* Download error message */}
-          {downloadError && !isThisDownloading && (
-            <p className="mt-2 text-[11px] text-red-600 leading-relaxed">{downloadError}</p>
-          )}
-
-          {/* Download button — only show if not downloaded and not currently downloading */}
-          {!cached && !isThisDownloading && (
-            <button
-              onClick={handleDownload}
-              className="mt-3 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-700 font-medium px-3 py-1.5 rounded-lg border border-blue-200 hover:bg-blue-50 transition"
-            >
-              <Download className="h-3.5 w-3.5" /> Download now ({model.sizeMb} MB)
-            </button>
-          )}
+          <p className="text-[11px] text-muted-foreground mt-2 font-mono">~{model.speedMs}ms · {model.accuracy} · {model.sizeMb} MB</p>
+        </div>
+        {/* Visual selection indicator — NOT interactive (the whole card is
+            the button). Just shows the selected/unselected state. */}
+        <div
+          className={`h-5 w-5 rounded-full border-2 shrink-0 mt-0.5 grid place-items-center transition ${
+            isActive ? "border-primary bg-primary" : "border-border"
+          }`}
+          aria-hidden="true"
+        >
+          {isActive && <CheckCircle2 className="h-3 w-3 text-primary-foreground" />}
         </div>
       </div>
-    </div>
+    </button>
   );
 }

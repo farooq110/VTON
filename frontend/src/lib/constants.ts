@@ -1,6 +1,17 @@
 import type { DetectionModel, TryOnSettings } from "@/types";
 
-/** Detection models registered for selection in Settings. Future-ready — add new entries here. */
+/**
+ * Detection models registered for selection in Settings.
+ *
+ * Both the person-detection section AND the posture-estimation section draw
+ * from this SAME list — every model here is a YOLOv8-pose variant that
+ * returns BOTH bounding boxes (for person detection) AND 17 COCO keypoints
+ * (for posture checks). Downloading a model once makes it available for
+ * BOTH stages.
+ *
+ * Future-ready — add new entries here and they automatically appear in both
+ * model-selection sections.
+ */
 export const DETECTION_MODELS: DetectionModel[] = [
   {
     id: "yolov8n-pose",
@@ -40,7 +51,24 @@ export const DETECTION_MODELS: DetectionModel[] = [
   },
 ];
 
+/**
+ * Map every DetectionModelId to its HuggingFace repo. Shared by the person-
+ * detection and posture-estimation flows — downloading a repo caches it for
+ * both stages.
+ */
+export const MODEL_REPO: Record<string, string> = {
+  "yolov8n-pose": "Xenova/yolov8n-pose",
+  "yolov8s-pose": "Xenova/yolov8s-pose",
+  "mediapipe-pose": "Xenova/yolov8n-pose",
+  "movenet-lightning": "Xenova/yolov8n-pose",
+};
+
 export const DEFAULT_SETTINGS: TryOnSettings = {
+  /** Stage 1 model — person detection. */
+  personDetectionModelId: "yolov8n-pose",
+  /** Stage 3 model — posture estimation. Independent selection. */
+  postureModelId: "yolov8n-pose",
+  /** Legacy field — kept for backward compat, migrated on load. */
   activeModelId: "yolov8n-pose",
   poseThresholds: {
     personScore: 0.6,
@@ -48,6 +76,12 @@ export const DEFAULT_SETTINGS: TryOnSettings = {
     faceYawDeg: 18,
     facePitchDeg: 15,
     minBodyVisibility: 0.55,
+  },
+  /** Stage 1 tuning parameters (owned by the person-detection section). */
+  personDetectionParams: {
+    confidenceThreshold: 0.6,
+    nmsIouThreshold: 0.5,
+    maxPersons: 10,
   },
   compression: {
     maxFileSizeKb: 1000,
@@ -71,6 +105,46 @@ export const DEFAULT_SETTINGS: TryOnSettings = {
     baseFontSize: "base",
   },
 };
+
+/**
+ * Migrates a persisted settings object from the OLD schema (which only had
+ * `activeModelId`) to the NEW schema (which has separate
+ * `personDetectionModelId` + `postureModelId` + `personDetectionParams`).
+ *
+ * Called once when the Zustand store rehydrates from localStorage. If the
+ * persisted settings already have the new fields, this is a no-op.
+ */
+export function migrateSettings(persisted: Partial<TryOnSettings>): TryOnSettings {
+  const defaults = structuredClone(DEFAULT_SETTINGS);
+  if (!persisted || typeof persisted !== "object") return defaults;
+
+  const merged: TryOnSettings = { ...defaults, ...persisted };
+
+  // Migrate old `activeModelId` → both new fields (if new fields are absent).
+  if (persisted.activeModelId && !persisted.personDetectionModelId) {
+    merged.personDetectionModelId = persisted.activeModelId;
+  }
+  if (persisted.activeModelId && !persisted.postureModelId) {
+    merged.postureModelId = persisted.activeModelId;
+  }
+
+  // Ensure personDetectionParams exists with defaults.
+  if (!merged.personDetectionParams) {
+    merged.personDetectionParams = structuredClone(defaults.personDetectionParams);
+  } else {
+    merged.personDetectionParams = {
+      ...defaults.personDetectionParams,
+      ...merged.personDetectionParams,
+    };
+  }
+
+  // Ensure poseThresholds is fully populated (in case a partial was persisted).
+  merged.poseThresholds = { ...defaults.poseThresholds, ...merged.poseThresholds };
+  merged.compression = { ...defaults.compression, ...merged.compression };
+  merged.theme = { ...defaults.theme, ...merged.theme };
+
+  return merged;
+}
 
 /** Mock brand fallback — fetched from backend /api/brand in production. */
 export const FALLBACK_BRAND = {

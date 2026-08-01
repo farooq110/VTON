@@ -7,6 +7,14 @@ export interface SwitchProps
   onCheckedChange?: (checked: boolean) => void;
 }
 
+/**
+ * Switch — a toggle control.
+ *
+ * Uses DIRECT conditional classes (not `peer` CSS) so the visual state
+ * always matches the `checked` prop. The previous `peer-checked:` approach
+ * could fail to update visually when the parent re-rendered via Framer
+ * Motion's AnimatePresence.
+ */
 const Switch = React.forwardRef<HTMLInputElement, SwitchProps>(
   ({ className, checked, onCheckedChange, disabled, ...props }, ref) => (
     <span className={cn("relative inline-flex h-6 w-11 items-center", className)}>
@@ -17,20 +25,22 @@ const Switch = React.forwardRef<HTMLInputElement, SwitchProps>(
         checked={checked}
         disabled={disabled}
         onChange={(e) => onCheckedChange?.(e.target.checked)}
-        className="peer sr-only"
+        className="sr-only"
         {...props}
       />
+      {/* Track — color depends directly on `checked` prop */}
       <span
         className={cn(
-          "absolute inset-0 cursor-pointer rounded-full bg-muted transition-colors",
-          "peer-checked:bg-primary peer-disabled:cursor-not-allowed peer-disabled:opacity-50",
-          "peer-focus-visible:ring-2 peer-focus-visible:ring-ring/50 peer-focus-visible:ring-offset-2",
+          "absolute inset-0 cursor-pointer rounded-full transition-colors",
+          checked ? "bg-primary" : "bg-muted",
+          disabled && "cursor-not-allowed opacity-50",
         )}
       />
+      {/* Thumb — position depends directly on `checked` prop */}
       <span
         className={cn(
           "absolute left-0.5 h-5 w-5 rounded-full bg-background shadow-sm transition-transform",
-          "peer-checked:translate-x-5",
+          checked && "translate-x-5",
         )}
       />
     </span>

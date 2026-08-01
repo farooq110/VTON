@@ -1,14 +1,17 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, Sparkles, X } from "lucide-react";
+import { Search, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { useProducts } from "@/hooks/useProducts";
 import { useAuthStore } from "@/lib/store";
 import { searchProducts } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { GlobalHeader } from "@/components/layout/GlobalHeader";
 import { ProductCard } from "@/components/products/ProductCard";
 import { ProductTryOnModal } from "@/components/products/ProductTryOnModal";
+import { FiltersModal } from "@/components/products/FiltersModal";
+import { logger } from "@/lib/logger";
 import type { Product } from "@/types";
 
 export function ProductsPage() {
@@ -19,6 +22,20 @@ export function ProductsPage() {
   const [category, setCategory] = useState("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [modalProduct, setModalProduct] = useState<Product | null>(null);
+  // Filter sidebar — opens the FiltersModal which contains ALL filter
+  // options (new arrivals, in-stock, price range, sizes, colors).
+  const [showFilters, setShowFilters] = useState(false);
+
+  // Count active filters for the badge on the filter button.
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (productFilters.newArrivalsOnly) count++;
+    if (productFilters.inStockOnly) count++;
+    if (productFilters.sizes.length > 0) count++;
+    if (productFilters.colors.length > 0) count++;
+    if (productFilters.priceMin !== null || productFilters.priceMax !== null) count++;
+    return count;
+  }, [productFilters]);
 
   const categories = useMemo(
     () => ["all", ...Array.from(new Set((products ?? []).map((p) => p.category)))],
@@ -76,7 +93,7 @@ export function ProductsPage() {
         backTo="/home"
       />
 
-      {/* Search + category filter */}
+      {/* Search + category filter + Filters button */}
       <div className="px-3 sm:px-6 lg:px-10 py-3 sm:py-4 flex flex-col sm:flex-row gap-2 sm:gap-3 bg-card/40 items-stretch">
         <div className="relative flex-1">
           <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -105,9 +122,29 @@ export function ProductsPage() {
             <option key={c} value={c}>{c === "all" ? "All categories" : c}</option>
           ))}
         </select>
+        {/* Filters button — opens the FiltersModal sidebar with ALL filter
+            options (new arrivals, in-stock, price range, sizes, colors). */}
+        <Button
+          variant="outline"
+          onClick={() => {
+            logger.interaction("Filters button clicked", { component: "ProductsPage" });
+            setShowFilters(true);
+          }}
+          className="h-12 sm:w-auto px-4 gap-2 relative"
+        >
+          <SlidersHorizontal className="h-4 w-4" />
+          <span className="hidden sm:inline">Filters</span>
+          {activeFilterCount > 0 && (
+            <Badge className="absolute -top-1 -right-1 h-5 min-w-[20px] px-1 text-[10px] bg-primary text-primary-foreground grid place-items-center rounded-full">
+              {activeFilterCount}
+            </Badge>
+          )}
+        </Button>
       </div>
 
-      {/* Tap mode hint + active filter chips */}
+      {/* Tap mode hint + active filter chips — ALL active filters are shown
+          here as removable chips so the user can see exactly what's
+          filtering the product list at a glance. */}
       <div className="px-3 sm:px-6 lg:px-10 pb-2 flex flex-wrap items-center gap-2">
         <p className="text-[10px] uppercase tracking-widest text-muted-foreground">
           Tap mode: <span className="text-foreground font-medium">{settings.productTapBehavior}</span>
@@ -127,6 +164,53 @@ export function ProductsPage() {
             className="inline-flex items-center gap-1 rounded-full bg-accent/15 text-accent px-2.5 py-1 text-[10px] font-medium hover:bg-accent/25 transition"
           >
             In stock
+            <X className="h-3 w-3" />
+          </button>
+        )}
+        {productFilters.priceMin !== null && (
+          <button
+            onClick={() => setProductFilters({ priceMin: null })}
+            className="inline-flex items-center gap-1 rounded-full bg-accent/15 text-accent px-2.5 py-1 text-[10px] font-medium hover:bg-accent/25 transition"
+          >
+            Min: ${productFilters.priceMin}
+            <X className="h-3 w-3" />
+          </button>
+        )}
+        {productFilters.priceMax !== null && (
+          <button
+            onClick={() => setProductFilters({ priceMax: null })}
+            className="inline-flex items-center gap-1 rounded-full bg-accent/15 text-accent px-2.5 py-1 text-[10px] font-medium hover:bg-accent/25 transition"
+          >
+            Max: ${productFilters.priceMax}
+            <X className="h-3 w-3" />
+          </button>
+        )}
+        {productFilters.sizes.map((size) => (
+          <button
+            key={`size-${size}`}
+            onClick={() => setProductFilters({ sizes: productFilters.sizes.filter((s) => s !== size) })}
+            className="inline-flex items-center gap-1 rounded-full bg-accent/15 text-accent px-2.5 py-1 text-[10px] font-medium hover:bg-accent/25 transition"
+          >
+            Size: {size}
+            <X className="h-3 w-3" />
+          </button>
+        ))}
+        {productFilters.colors.map((color) => (
+          <button
+            key={`color-${color}`}
+            onClick={() => setProductFilters({ colors: productFilters.colors.filter((c) => c !== color) })}
+            className="inline-flex items-center gap-1 rounded-full bg-accent/15 text-accent px-2.5 py-1 text-[10px] font-medium hover:bg-accent/25 transition"
+          >
+            {color}
+            <X className="h-3 w-3" />
+          </button>
+        ))}
+        {activeFilterCount > 0 && (
+          <button
+            onClick={() => resetProductFilters()}
+            className="inline-flex items-center gap-1 rounded-full bg-destructive/10 text-destructive px-2.5 py-1 text-[10px] font-medium hover:bg-destructive/20 transition"
+          >
+            Clear all
             <X className="h-3 w-3" />
           </button>
         )}
@@ -170,6 +254,11 @@ export function ProductsPage() {
         onTryOn={() => handleTryOn(modalProduct ?? undefined)}
         onViewDetails={handleViewDetails}
       />
+
+      {/* Filters modal — opens when the user clicks the Filters button.
+          Contains ALL filter options: new arrivals, in-stock, price range,
+          sizes, colors. Applies immediately to the store's productFilters. */}
+      <FiltersModal open={showFilters} onClose={() => setShowFilters(false)} />
     </div>
   );
 }

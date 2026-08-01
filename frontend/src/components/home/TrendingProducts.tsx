@@ -1,75 +1,77 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Flame, Loader2, Sparkles } from "lucide-react";
+import { Flame, Loader2, Sparkles, CheckCircle2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ProductCard } from "@/components/products/ProductCard";
 import { useProducts } from "@/hooks/useProducts";
 import { useAuthStore } from "@/lib/store";
+import { logger } from "@/lib/logger";
 import type { Product } from "@/types";
 
 /**
- * TrendingProducts — INFINITE-scrolling rail of trending products.
- *
- * The list cycles through the catalog repeatedly so it never runs out —
- * the user can keep scrolling forever and products keep appearing. This is
- * intentional for kiosk displays where the home screen should always look
- * full of options.
+ * TrendingProducts — paginated rail of trending products, CAPPED at 30.
  *
  * Behavior:
  *   - Sorts the real catalog by `trendingScore` (desc).
  *   - IntersectionObserver loads 8 more at a time.
- *   - When the end of the catalog is reached, it cycles back to the start
- *     (appending the same products again with a new key) so the list is
- *     truly infinite — no "You've seen all styles" footer.
- *   - Tap a card → expand inline → reveal TRY ON + Details buttons.
+ *   - STOPS at 30 products — displays a clear "No more products" message
+ *     when the user reaches the end.
+ *   - Tap a card → expand ONLY that card (unique cardKey) → reveal TRY ON
+ *     + Details buttons.
  */
 const PAGE_SIZE = 8;
+const MAX_TRENDING = 30;
 
 export function TrendingProducts({ className = "" }: { className?: string }) {
   const navigate = useNavigate();
   useProducts();
   const products = useAuthStore((s) => s.products);
 
-  // Trending = real catalog sorted by trendingScore (desc).
+  // Trending = real catalog sorted by trendingScore (desc), capped at 30.
   const trending = useMemo(
     () =>
-      (Array.isArray(products) ? [...products] : []).sort(
-        (a, b) => (b.trendingScore ?? 0) - (a.trendingScore ?? 0),
-      ),
+      (Array.isArray(products) ? [...products] : [])
+        .sort((a, b) => (b.trendingScore ?? 0) - (a.trendingScore ?? 0))
+        .slice(0, MAX_TRENDING),
     [products],
   );
 
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoading, setIsLoading] = useState(false);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Unique per-card key so only the tapped card expands (not all cards with
+  // the same product.id).
+  const [expandedCardKey, setExpandedCardKey] = useState<string | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  // Infinite list — cycle through the catalog. Each "page" beyond the first
-  // reuses the same products with a different cycle index so React keys stay
-  // unique. The list never ends.
+  // displayed = first `visibleCount` of the (capped) trending list.
   const displayed = useMemo(() => {
     if (trending.length === 0) return [];
-    const result: { product: Product; cycle: number; idx: number }[] = [];
-    for (let i = 0; i < visibleCount; i++) {
-      const cycle = Math.floor(i / trending.length);
-      const idx = i % trending.length;
-      result.push({ product: trending[idx], cycle, idx });
+    const result: { product: Product; idx: number; cardKey: string }[] = [];
+    for (let i = 0; i < Math.min(visibleCount, trending.length); i++) {
+      const product = trending[i];
+      const cardKey = `${product.id}-${i}`;
+      result.push({ product, idx: i, cardKey });
     }
     return result;
   }, [trending, visibleCount]);
 
+  // True when the user has seen all 30 (or fewer if catalog is smaller).
+  const hasReachedEnd = visibleCount >= trending.length;
+
   const loadMore = useCallback(() => {
     if (isLoading || trending.length === 0) return;
+    if (visibleCount >= trending.length) return; // already at the end
     setIsLoading(true);
     setTimeout(() => {
-      setVisibleCount((c) => c + PAGE_SIZE);
+      setVisibleCount((c) => Math.min(c + PAGE_SIZE, trending.length));
       setIsLoading(false);
     }, 400);
-  }, [isLoading, trending.length]);
+  }, [isLoading, trending.length, visibleCount]);
 
-  // IntersectionObserver — always attached (infinite list never stops).
+  // IntersectionObserver — only loads more when NOT at the end.
   useEffect(() => {
+    if (hasReachedEnd) return; // no more to load — don't observe
     const node = sentinelRef.current;
     if (!node) return;
     const observer = new IntersectionObserver(
@@ -80,29 +82,37 @@ export function TrendingProducts({ className = "" }: { className?: string }) {
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [loadMore]);
+  }, [loadMore, hasReachedEnd]);
 
-  const handleTap = (product: Product) => {
-    setExpandedId((cur) => (cur === product.id ? null : product.id));
+  const handleTap = (_product: Product, cardKey: string) => {
+    logger.interaction(`Trending card tapped: ${_product.name}`, {
+      component: "TrendingProducts",
+      detail: `SKU ${_product.sku}`,
+    });
+    setExpandedCardKey((cur) => (cur === cardKey ? null : cardKey));
   };
 
   const handleTryOn = (product: Product) => {
+    logger.interaction(`TRY ON clicked: ${product.name}`, {
+      component: "TrendingProducts",
+    });
     useAuthStore.getState().selectProduct(product.id);
-    setExpandedId(null);
+    setExpandedCardKey(null);
     navigate("/tryon/camera");
   };
 
   const handleViewDetails = (product: Product) => {
-    setExpandedId(null);
+    logger.interaction(`View details clicked: ${product.name}`, {
+      component: "TrendingProducts",
+    });
+    setExpandedCardKey(null);
     useAuthStore.getState().selectProduct(product.id);
     navigate(`/products/${product.id}`);
   };
 
   return (
     <div className={`flex flex-col ${className}`}>
-      {/* Header — sticky to the top of the viewport (under the main header)
-          so it stays visible while the page scrolls. z-30 to sit above the
-          product grid but below the main header (z-40) + menu overlay (z-50). */}
+      {/* Header — sticky to the top of the viewport (under the main header). */}
       <div className="sticky top-[64px] sm:top-[72px] lg:top-[80px] z-30 flex items-center justify-between px-3 sm:px-6 lg:px-10 py-3 shrink-0 border-b border-border/40 bg-background/95 backdrop-blur-md">
         <div className="flex items-center gap-2">
           <Flame className="h-5 w-5 text-accent" />
@@ -112,14 +122,14 @@ export function TrendingProducts({ className = "" }: { className?: string }) {
           </Badge>
         </div>
         <p className="hidden sm:block text-xs text-muted-foreground">
-          Scroll to explore more
+          {hasReachedEnd ? "You've seen all styles" : "Scroll to explore more"}
         </p>
       </div>
 
-      {/* Grid — the whole page scrolls naturally; no internal scroll container. */}
+      {/* Grid */}
       <div className="px-3 sm:px-6 lg:px-10 py-4">
         {trending.length === 0 ? (
-          /* Beautiful empty state — shown when no trending products are available */
+          /* Empty state — no trending products available */
           <div className="flex flex-col items-center justify-center py-16 sm:py-24 text-center px-4 max-w-md mx-auto">
             <div className="h-20 w-20 rounded-full bg-accent/15 text-accent grid place-items-center mb-5 shadow-boutique">
               <Sparkles className="h-9 w-9" />
@@ -140,13 +150,13 @@ export function TrendingProducts({ className = "" }: { className?: string }) {
         ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4">
-              {displayed.map(({ product, cycle, idx }) => (
+              {displayed.map(({ product, idx, cardKey }) => (
                 <ProductCard
-                  key={`${product.id}-${cycle}-${idx}`}
+                  key={cardKey}
                   product={product}
                   index={idx}
-                  expanded={expandedId === product.id}
-                  onTap={() => handleTap(product)}
+                  expanded={expandedCardKey === cardKey}
+                  onTap={() => handleTap(product, cardKey)}
                   onTryOn={() => handleTryOn(product)}
                   onViewDetails={() => handleViewDetails(product)}
                   variant="compact"
@@ -159,12 +169,28 @@ export function TrendingProducts({ className = "" }: { className?: string }) {
               ))}
             </div>
 
-            {/* Sentinel — always rendered (infinite list). Shows spinner while loading. */}
-            <div ref={sentinelRef} className="h-12 grid place-items-center mt-4">
+            {/* Sentinel + end-of-list message.
+                When the user has seen all 30 products, show a clear
+                "No more products" message. The Browse-all button has been
+                removed per the user's request — the user can navigate to
+                the full collection via the header menu or the home banner.
+                Bottom padding ensures this isn't hidden behind the footer. */}
+            <div ref={sentinelRef} className="grid place-items-center mt-6 pb-24 min-h-[120px]">
               {isLoading && (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   Loading more styles…
+                </div>
+              )}
+              {!isLoading && hasReachedEnd && (
+                <div className="flex flex-col items-center gap-2 py-4 text-center">
+                  <div className="h-10 w-10 rounded-full bg-accent/10 text-accent grid place-items-center">
+                    <CheckCircle2 className="h-5 w-5" />
+                  </div>
+                  <p className="font-display text-sm font-medium text-foreground">No more products</p>
+                  <p className="text-xs text-muted-foreground">
+                    You&apos;ve seen all {trending.length} trending styles.
+                  </p>
                 </div>
               )}
             </div>

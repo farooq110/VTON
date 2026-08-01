@@ -50,18 +50,12 @@ export function CapturesGalleryPage() {
     [products, selectedProductId],
   );
 
-  // Spec: "it should not go to tryon camera page until it select garments"
+  // The camera button in the captures gallery should simply open the camera
+  // so the user can capture and upload a person's image. It does NOT require
+  // a selected product — the user can capture a person photo here without
+  // intending to try-on yet. The product requirement is enforced only when
+  // the user clicks "Try on with this" on a saved image.
   const goToCamera = () => {
-    if (!selectedProductId) {
-      toast({
-        title: "Select a garment first",
-        description:
-          "Browse the collection and pick a piece to try on before opening the camera.",
-        variant: "destructive",
-      });
-      navigate("/products");
-      return;
-    }
     navigate("/tryon/camera");
   };
 
@@ -94,15 +88,16 @@ export function CapturesGalleryPage() {
 
   // Spec: "in person image when user click do no tryon directly first ask for
   // user to insure user want in modal with both garments and person image"
+  // If no product is selected, show a toast but DON'T navigate away — the
+  // user stays on the captures gallery page.
   const tryWithImage = (img: SavedCaptureImage) => {
     if (!product) {
       toast({
-        title: "Select a garment first",
-        description: "Browse the collection and pick a piece to try on.",
+        title: "Select a product first",
+        description: "Browse the collection and pick a garment to try on with this image.",
         variant: "destructive",
       });
-      navigate("/products");
-      return;
+      return; // stay on the page — don't navigate to /products
     }
     setConfirmImage(img);
   };

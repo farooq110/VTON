@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Check, RotateCcw, SlidersHorizontal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,14 +13,19 @@ import type { Product, ProductFilters } from "@/types";
 /**
  * FiltersModal — full filter panel for the products list.
  *
- * Ported from the Next.js preview's tryon/FiltersModal.tsx, simplified to
- * fit the frontend's smaller UI kit (no shadcn `variant` API on Badge,
- * inline facet helpers instead of importing from utils).
+ * ─── DRAFT / COMMIT PATTERN ─────────────────────────────────────────────
+ * Filters do NOT apply immediately when the user toggles/slides/selects.
+ * Instead, all changes go into a LOCAL DRAFT state. The draft is only
+ * committed to the global store (which drives the actual product filtering)
+ * when the user clicks "Show Results". This matches the user's expectation:
+ * they can experiment with filters in the modal without seeing the product
+ * grid jump around behind it.
  *
- * Filters: new-arrivals toggle, in-stock toggle, price range (min/max slider),
- * sizes (multi), colors (multi). Applies immediately to the store's
- * `productFilters`, which can be consumed both client-side and forwarded to
- * the backend query string.
+ * If the user closes the modal via the X button or backdrop click WITHOUT
+ * clicking "Show Results", the draft is discarded — the store keeps its
+ * previous filters.
+ *
+ * The "Reset" button resets the DRAFT (not the committed filters) to empty.
  */
 export interface FiltersModalProps {
   open: boolean;
@@ -28,25 +34,57 @@ export interface FiltersModalProps {
 
 export function FiltersModal({ open, onClose }: FiltersModalProps) {
   const products = useAuthStore((s) => s.products);
-  const filters = useAuthStore((s) => s.productFilters);
+  const committedFilters = useAuthStore((s) => s.productFilters);
   const setProductFilters = useAuthStore((s) => s.setProductFilters);
-  const resetProductFilters = useAuthStore((s) => s.resetProductFilters);
+
+  // ─── DRAFT STATE ──────────────────────────────────────────────────────
+  // The draft is initialized from the COMMITTED filters when the modal opens.
+  // All controls update the draft (local state) — the store is NOT touched
+  // until "Show Results" is clicked.
+  const [draft, setDraft] = useState<ProductFilters>(committedFilters);
+
+  // When the modal opens, sync the draft from the committed filters.
+  // This ensures the draft reflects the current state every time the user
+  // opens the modal (e.g. if they opened it, changed some filters, closed
+  // without applying, then reopened — they see the last committed state).
+  useEffect(() => {
+    if (open) {
+      setDraft({ ...committedFilters });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const facets = collectFilterFacets(products);
-  const activeCount = countActiveFilters(filters);
+  const draftActiveCount = countActiveFilters(draft);
+
+  const patchDraft = (patch: Partial<ProductFilters>) => {
+    setDraft((d) => ({ ...d, ...patch }));
+  };
 
   const toggleSize = (size: string) => {
-    const next = filters.sizes.includes(size)
-      ? filters.sizes.filter((s) => s !== size)
-      : [...filters.sizes, size];
-    setProductFilters({ sizes: next });
+    const next = draft.sizes.includes(size)
+      ? draft.sizes.filter((s) => s !== size)
+      : [...draft.sizes, size];
+    patchDraft({ sizes: next });
   };
 
   const toggleColor = (color: string) => {
-    const next = filters.colors.includes(color)
-      ? filters.colors.filter((c) => c !== color)
-      : [...filters.colors, color];
-    setProductFilters({ colors: next });
+    const next = draft.colors.includes(color)
+      ? draft.colors.filter((c) => c !== color)
+      : [...draft.colors, color];
+    patchDraft({ colors: next });
+  };
+
+  const resetDraft = () => {
+    setDraft({ ...EMPTY_FILTERS });
+  };
+
+  // ─── COMMIT ───────────────────────────────────────────────────────────
+  // Only called when the user clicks "Show Results". Writes the draft to
+  // the store (which drives the actual product filtering) and closes.
+  const applyAndClose = () => {
+    setProductFilters(draft);
+    onClose();
   };
 
   return (
@@ -72,18 +110,18 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
               <div className="flex items-center gap-2">
                 <SlidersHorizontal className="h-4 w-4 text-primary" />
                 <h2 className="font-display text-base sm:text-lg font-medium">Filters</h2>
-                {activeCount > 0 && (
+                {draftActiveCount > 0 && (
                   <Badge className="text-[10px] bg-secondary text-secondary-foreground">
-                    {activeCount} active
+                    {draftActiveCount} selected
                   </Badge>
                 )}
               </div>
               <div className="flex items-center gap-1">
-                {activeCount > 0 && (
+                {draftActiveCount > 0 && (
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={resetProductFilters}
+                    onClick={resetDraft}
                     className="h-8 gap-1.5 text-xs"
                   >
                     <RotateCcw className="h-3 w-3" /> Reset
@@ -95,14 +133,14 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
               </div>
             </div>
 
-            {/* Body — scrollable */}
+            {/* Body — scrollable. All controls update the DRAFT only. */}
             <div className="flex-1 overflow-y-auto scrollbar-boutique p-4 sm:p-5 space-y-6">
               {/* New arrivals toggle */}
               <ToggleRow
                 label="New arrivals only"
                 hint="Show only pieces marked as new this season."
-                checked={filters.newArrivalsOnly}
-                onChange={(v) => setProductFilters({ newArrivalsOnly: v })}
+                checked={draft.newArrivalsOnly}
+                onChange={(v) => patchDraft({ newArrivalsOnly: v })}
               />
 
               <Separator />
@@ -111,8 +149,8 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
               <ToggleRow
                 label="In stock only"
                 hint="Hide sold-out pieces."
-                checked={filters.inStockOnly}
-                onChange={(v) => setProductFilters({ inStockOnly: v })}
+                checked={draft.inStockOnly}
+                onChange={(v) => patchDraft({ inStockOnly: v })}
               />
 
               <Separator />
@@ -122,39 +160,39 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
                 <div className="flex items-center justify-between">
                   <p className="text-sm font-medium">Price range</p>
                   <span className="text-xs font-mono text-muted-foreground">
-                    ${filters.priceMin ?? facets.priceMin} – ${filters.priceMax ?? facets.priceMax}
+                    ${draft.priceMin ?? facets.priceMin} – ${draft.priceMax ?? facets.priceMax}
                   </span>
                 </div>
                 <div className="space-y-3">
                   <div>
                     <p className="text-xs text-muted-foreground mb-2">
-                      Min: ${filters.priceMin ?? facets.priceMin}
+                      Min: ${draft.priceMin ?? facets.priceMin}
                     </p>
                     <Slider
-                      value={[filters.priceMin ?? facets.priceMin]}
+                      value={[draft.priceMin ?? facets.priceMin]}
                       min={facets.priceMin}
                       max={facets.priceMax}
                       step={10}
-                      onValueChange={([v]) => setProductFilters({ priceMin: v })}
+                      onValueChange={([v]) => patchDraft({ priceMin: v })}
                     />
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-2">
-                      Max: ${filters.priceMax ?? facets.priceMax}
+                      Max: ${draft.priceMax ?? facets.priceMax}
                     </p>
                     <Slider
-                      value={[filters.priceMax ?? facets.priceMax]}
+                      value={[draft.priceMax ?? facets.priceMax]}
                       min={facets.priceMin}
                       max={facets.priceMax}
                       step={10}
-                      onValueChange={([v]) => setProductFilters({ priceMax: v })}
+                      onValueChange={([v]) => patchDraft({ priceMax: v })}
                     />
                   </div>
                 </div>
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setProductFilters({ priceMin: null, priceMax: null })}
+                  onClick={() => patchDraft({ priceMin: null, priceMax: null })}
                   className="h-7 text-xs text-muted-foreground"
                 >
                   Clear price
@@ -172,7 +210,7 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
                       key={s}
                       onClick={() => toggleSize(s)}
                       className={`min-w-[2.75rem] h-10 px-3 rounded-xl border text-sm font-medium transition ${
-                        filters.sizes.includes(s)
+                        draft.sizes.includes(s)
                           ? "border-primary bg-primary text-primary-foreground"
                           : "border-border bg-background hover:border-foreground/40"
                       }`}
@@ -194,7 +232,7 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
                       key={c.name}
                       onClick={() => toggleColor(c.name)}
                       className={`flex items-center gap-2 h-10 px-3 rounded-xl border text-sm font-medium transition ${
-                        filters.colors.includes(c.name)
+                        draft.colors.includes(c.name)
                           ? "border-primary bg-primary/5"
                           : "border-border bg-background hover:border-foreground/40"
                       }`}
@@ -204,18 +242,21 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
                         style={{ backgroundColor: c.hex }}
                       />
                       {c.name}
-                      {filters.colors.includes(c.name) && <Check className="h-3.5 w-3.5 text-primary" />}
+                      {draft.colors.includes(c.name) && <Check className="h-3.5 w-3.5 text-primary" />}
                     </button>
                   ))}
                 </div>
               </div>
             </div>
 
-            {/* Footer — apply (closes modal) */}
+            {/* Footer — "Show Results" commits the draft to the store. */}
             <div className="p-4 sm:p-5 border-t border-border/60 bg-card shrink-0">
-              <Button onClick={onClose} className="w-full h-12 text-base">
-                Show results
+              <Button onClick={applyAndClose} className="w-full h-12 text-base">
+                Show {draftActiveCount > 0 ? `${draftActiveCount} filter${draftActiveCount === 1 ? "" : "s"} · ` : ""}Results
               </Button>
+              <p className="text-[10px] text-muted-foreground text-center mt-2">
+                Filters apply only when you tap &quot;Show Results&quot;.
+              </p>
             </div>
           </motion.div>
         </motion.div>
@@ -248,7 +289,6 @@ function ToggleRow({
 
 /** Collect unique sizes/colors/categories across a product list — for filter UI. */
 function collectFilterFacets(products: Product[]) {
-  // Defensive: tolerate non-array inputs so the filter modal never crashes.
   const list = Array.isArray(products) ? products : [];
   const categories = Array.from(new Set(list.map((p) => p?.category).filter(Boolean))).sort();
   const sizes = Array.from(new Set(list.flatMap((p) => p?.sizes ?? []))).sort();

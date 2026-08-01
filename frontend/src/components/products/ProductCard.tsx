@@ -4,6 +4,7 @@ import { Camera, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatPrice, resolveProductImage, onImageError } from "@/lib/utils";
+import { logger } from "@/lib/logger";
 import type { Product } from "@/types";
 
 /**
@@ -72,7 +73,13 @@ export function ProductCard({
       className="rounded-2xl overflow-hidden bg-card border border-border/60 shadow-boutique hover:shadow-elevated transition-shadow flex flex-col"
     >
       <button
-        onClick={onTap}
+        onClick={() => {
+          logger.interaction(`Product card tapped: ${product.name}`, {
+            component: "ProductCard",
+            detail: `SKU ${product.sku} · ${expanded ? "collapsing" : "expanding"}`,
+          });
+          onTap();
+        }}
         className="group block w-full text-left cursor-pointer"
         aria-label={`${product.name} — ${product.sku} — tap to ${expanded ? "collapse" : "expand"}`}
       >
@@ -166,14 +173,22 @@ export function ProductExpandedActions({
           <Button
             variant="outline"
             size="sm"
-            onClick={(e) => { e.stopPropagation(); onViewDetails(); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              logger.interaction(`View details clicked: ${product.name}`, { component: "ProductExpandedActions" });
+              onViewDetails();
+            }}
             className="flex-1 min-w-[calc(50%-0.25rem)] h-10 gap-1 text-xs whitespace-nowrap"
           >
             <RotateCcw className="h-3.5 w-3.5 shrink-0" /> <span className="truncate">Details</span>
           </Button>
           <Button
             size="sm"
-            onClick={(e) => { e.stopPropagation(); onTryOn(); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              logger.interaction(`TRY ON clicked: ${product.name}`, { component: "ProductExpandedActions" });
+              onTryOn();
+            }}
             className="flex-[1.4] min-w-[calc(50%-0.25rem)] h-10 gap-1 text-xs whitespace-nowrap"
           >
             <Camera className="h-4 w-4 shrink-0" /> <span className="truncate">TRY ON</span>

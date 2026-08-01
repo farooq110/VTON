@@ -9,17 +9,26 @@ export interface SliderProps
 
 /**
  * Minimal native-range slider. Visually themed via accent-color so it inherits
- * the boutique plum. Swap with Radix Slider later without changing call sites.
+ * the boutique plum.
+ *
+ * FULLY CONTROLLED: The `value` prop is always used to set the input's value.
+ * The `key` prop on the parent should be stable so React doesn't remount the
+ * input on every render (which would lose focus/drag state).
  */
 const Slider = React.forwardRef<HTMLInputElement, SliderProps>(
   ({ className, value, defaultValue, onValueChange, ...props }, ref) => {
-    const currentValue =
-      value && String(value).length > 0 ? String(value)[0] : defaultValue && String(defaultValue).length > 0 ? String(defaultValue)[0] : 0;
+    // Extract the numeric value — default to 0 if not provided.
+    const numValue =
+      value && value.length > 0
+        ? value[0]
+        : Array.isArray(defaultValue) && defaultValue.length > 0
+          ? defaultValue[0]
+          : 0;
     return (
       <input
         ref={ref}
         type="range"
-        value={currentValue}
+        value={numValue}
         onChange={(e) => onValueChange?.([Number(e.target.value)])}
         className={cn(
           "w-full h-2 cursor-pointer appearance-none rounded-full bg-muted",

@@ -4,6 +4,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ArrowLeft, Camera as CameraIcon, Home as HomeIcon, Image as ImageIcon, LogOut, Menu, Settings as SettingsIcon, Shirt, Sparkles, Tag, X } from "lucide-react";
 import { useAuthStore } from "@/lib/store";
 import { canAccessSettings } from "@/types";
+import { logger } from "@/lib/logger";
+import { useToast } from "@/components/ui/toast";
 
 /**
  * GlobalHeader — shared header on ALL screens.
@@ -36,19 +38,29 @@ export function GlobalHeader({ title, subtitle, showBack = true, backTo, rightSl
   const showSettings = canAccessSettings(user?.role);
   const isPublicUser = user?.role === "public_user";
   const [menuOpen, setMenuOpen] = useState(false);
+  const { toast } = useToast();
 
   const handleBack = () => {
+    logger.interaction("Back button clicked", { component: "GlobalHeader", detail: backTo ?? "history" });
     if (backTo) navigate(backTo);
     else navigate(-1);
   };
 
   const nav = (path: string) => {
+    logger.interaction(`Nav menu: ${path}`, { component: "GlobalHeader" });
     // Spec: "it should not go to tryon camera page until it select garments"
+    // If the user clicks "Try-on camera" without a selected product, show a
+    // toast and KEEP THE MENU OPEN (don't close it or navigate away).
     if (path === "/tryon/camera") {
       const selectedId = useAuthStore.getState().selectedProductId;
       if (!selectedId) {
-        navigate("/products");
-        setMenuOpen(false);
+        toast({
+          title: "Select a product first",
+          description: "Browse the collection and pick a garment before opening the try-on camera.",
+          variant: "destructive",
+        });
+        // Deliberately do NOT close the menu — the user may want to pick
+        // a different nav entry after seeing the toast.
         return;
       }
     }
@@ -57,6 +69,7 @@ export function GlobalHeader({ title, subtitle, showBack = true, backTo, rightSl
   };
 
   const handleSignOut = () => {
+    logger.interaction("Sign out clicked", { component: "GlobalHeader" });
     signOut();
     setMenuOpen(false);
     navigate("/signin");
@@ -95,7 +108,10 @@ export function GlobalHeader({ title, subtitle, showBack = true, backTo, rightSl
 
         {/* Menu button — visible on ALL screen sizes */}
         <button
-          onClick={() => setMenuOpen((o) => !o)}
+          onClick={() => {
+            logger.interaction(`Menu ${menuOpen ? "closed" : "opened"}`, { component: "GlobalHeader" });
+            setMenuOpen((o) => !o);
+          }}
           className="shrink-0 h-10 w-10 grid place-items-center rounded-lg hover:bg-muted transition"
           aria-label="Toggle menu"
         >

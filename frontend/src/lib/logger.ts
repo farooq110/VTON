@@ -1,12 +1,14 @@
 import { useAuthStore } from "@/lib/store";
+import apiClient from "@/lib/api-client";
 import type { ActivityLogEntry } from "@/types";
 
 /**
  * logger — the global diagnostic logging utility.
  *
  * This is the SINGLE ENTRY POINT for all client-side logging. Every module
- * (camera, pose detection, compression, auth, network, settings) imports
- * `logger` instead of calling `console.log` or `logActivity` directly.
+ * (camera, pose detection, compression, auth, network, settings, navigation,
+ * component interactions) imports `logger` instead of calling `console.log`
+ * or `logActivity` directly.
  *
  * **Settings-to-Logger Bridge:** the logger reads `settings.debugLogging`
  * from the Zustand store on every call. When the toggle is OFF, all log
@@ -15,19 +17,17 @@ import type { ActivityLogEntry } from "@/types";
  *   2. Mirrored to `console.{log,warn,error}` for devtools inspection
  *   3. Tagged with a category for filtering
  *
+ * **Tips:** error/warn logs can include a `tip` field explaining HOW to fix
+ * the issue. The ActivityLogPanel surfaces this as a highlighted "Fix"
+ * callout so the user isn't left guessing.
+ *
+ * **Component interactions:** the `interaction()` method logs user clicks,
+ * taps, toggles, etc. with the component's name so the activity log shows a
+ * full timeline of what the user did (excluding scroll events, which are
+ * too noisy).
+ *
  * **Telemetry:** when `settings.telemetryEnabled` is ON, error-level logs are
- * also POSTed to the backend `/api/telemetry` endpoint (fire-and-forget) so
- * the server can track client-side failures.
- *
- * **Persistence:** the underlying store is persisted to localStorage via
- * Zustand's `persist` middleware, so logs survive page refreshes (up to 100
- * entries — see `store.ts` partialize).
- *
- * Usage:
- *   import { logger } from "@/lib/logger";
- *   logger.capture("Camera opened", { detail: "user-facing camera" });
- *   logger.network("TryOn AI call failed", { detail: err.message, level: "error" });
- *   logger.model("YOLOv8n loaded", { detail: "3.2 MB", durationMs: 1200 });
+ * also POSTed to the backend `/api/telemetry` endpoint (fire-and-forget).
  */
 
 export type LogCategory = ActivityLogEntry["category"];
@@ -37,6 +37,10 @@ export interface LogOptions {
   detail?: string;
   level?: LogLevel;
   durationMs?: number;
+  /** Optional actionable tip — explains HOW to fix the issue. */
+  tip?: string;
+  /** Optional component name (for interaction logs). */
+  component?: string;
 }
 
 class Logger {
@@ -58,11 +62,15 @@ class Logger {
       level: opts.level ?? "info",
       durationMs: opts.durationMs,
       timestamp,
+      tip: opts.tip,
+      component: opts.component,
     });
 
     // 2. Mirror to console for devtools inspection
     const level = opts.level ?? "info";
-    const consoleMsg = `[${category.toUpperCase()}] ${label}${opts.detail ? ` — ${opts.detail}` : ""}${opts.durationMs ? ` (${opts.durationMs}ms)` : ""}`;
+    const tipSuffix = opts.tip ? ` [TIP: ${opts.tip}]` : "";
+    const compPrefix = opts.component ? `[${opts.component}] ` : "";
+    const consoleMsg = `[${category.toUpperCase()}] ${compPrefix}${label}${opts.detail ? ` — ${opts.detail}` : ""}${opts.durationMs ? ` (${opts.durationMs}ms)` : ""}${tipSuffix}`;
     switch (level) {
       case "error":
         console.error(consoleMsg);
@@ -80,6 +88,7 @@ class Logger {
         category,
         label,
         detail: opts.detail,
+        tip: opts.tip,
         level,
         timestamp,
       }).catch(() => {
@@ -93,26 +102,20 @@ class Logger {
     category: string;
     label: string;
     detail?: string;
+    tip?: string;
     level: string;
     timestamp: number;
   }): Promise<void> {
     try {
-      const token = localStorage.getItem("nova_token");
-      await fetch("/api/telemetry", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          level: entry.level,
-          category: entry.category,
-          message: entry.label,
-          detail: entry.detail,
-          timestamp: entry.timestamp,
-          userAgent: navigator.userAgent,
-          url: window.location.href,
-        }),
+      await apiClient.post("/telemetry", {
+        level: entry.level,
+        category: entry.category,
+        message: entry.label,
+        detail: entry.detail,
+        tip: entry.tip,
+        timestamp: entry.timestamp,
+        userAgent: navigator.userAgent,
+        url: window.location.href,
       });
     } catch {
       // Best-effort — swallow
@@ -164,6 +167,17 @@ class Logger {
   /** Settings events — toggle changes, model switches. */
   settings(label: string, opts?: LogOptions): void {
     this.emit("settings", label, opts);
+  }
+
+  /**
+   * Component interaction events — clicks, taps, toggles, selects, etc.
+   * Excludes scroll events (too noisy). Pass the component's name so the
+   * log shows exactly what the user interacted with.
+   *
+   * Example: `logger.interaction("Trending card tapped", { component: "ProductCard", detail: product.name })`
+   */
+  interaction(label: string, opts?: LogOptions): void {
+    this.emit("interaction", label, opts);
   }
 
   /** Generic log — use when no specific category fits. */

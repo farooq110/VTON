@@ -5,6 +5,7 @@ import {
   CheckSquare,
   Clock,
   Copy,
+  Lightbulb,
   Square,
   Trash2,
   X,
@@ -95,7 +96,7 @@ export function ActivityLogPanel() {
           initial={{ scale: 0, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           onClick={() => setOpen(true)}
-          className="fixed bottom-4 right-4 z-40 h-12 px-4 rounded-full bg-primary text-primary-foreground shadow-elevated flex items-center gap-2 text-sm font-medium"
+          className="fixed bottom-4 right-4 z-[9999] h-12 px-4 rounded-full bg-primary text-primary-foreground shadow-elevated flex items-center gap-2 text-sm font-medium"
         >
           <Activity className="h-4 w-4" />
           <span>Activity</span>
@@ -112,7 +113,7 @@ export function ActivityLogPanel() {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: "100%", opacity: 0 }}
             transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-            className="fixed bottom-0 left-0 right-0 z-40 lg:left-auto lg:right-4 lg:bottom-4 lg:w-[480px] lg:rounded-2xl bg-card border border-border/60 shadow-elevated"
+            className="fixed bottom-0 left-0 right-0 z-[9999] lg:left-auto lg:right-4 lg:bottom-4 lg:w-[480px] lg:rounded-2xl bg-card border border-border/60 shadow-elevated"
           >
             <div className="flex items-center justify-between p-3 sm:p-4 border-b border-border/60 flex-wrap gap-2">
               <div className="flex items-center gap-2">
@@ -250,6 +251,7 @@ function LogRow({
     network: "bg-rose-500/15 text-rose-700",
     settings: "bg-gray-500/15 text-gray-700",
     camera: "bg-indigo-500/15 text-indigo-700",
+    interaction: "bg-emerald-500/15 text-emerald-700",
   }[entry.category];
 
   return (
@@ -284,11 +286,25 @@ function LogRow({
               {entry.detail}
             </p>
           )}
-          <div className="flex items-center gap-2 mt-1 text-[10px] text-muted-foreground">
+          {/* Actionable tip — explains HOW to fix the issue. Shown as a
+              highlighted callout so the user isn't left guessing. */}
+          {entry.tip && (
+            <div className="mt-1.5 rounded-lg bg-accent/10 border border-accent/20 px-2 py-1.5 flex items-start gap-1.5">
+              <Lightbulb className="h-3 w-3 text-accent shrink-0 mt-0.5" />
+              <p className="text-[11px] text-accent-foreground/90 leading-relaxed">
+                <span className="font-medium text-accent">Fix: </span>
+                {entry.tip}
+              </p>
+            </div>
+          )}
+          <div className="flex items-center gap-2 mt-1 text-[10px] text-muted-foreground flex-wrap">
             <Clock className="h-2.5 w-2.5" />
             <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
             {entry.durationMs !== undefined && (
               <span className="font-mono">· {formatDuration(entry.durationMs)}</span>
+            )}
+            {entry.component && (
+              <span className="font-mono px-1 rounded bg-muted">↳ {entry.component}</span>
             )}
           </div>
         </div>

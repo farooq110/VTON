@@ -16,6 +16,9 @@ import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useImageCompression } from "@/hooks/useImageCompression";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { useAuthStore } from "@/lib/store";
+import { logger } from "@/lib/logger";
+import { isModelDownloaded } from "@/lib/model-persistence";
+import { useToast } from "@/components/ui/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -46,6 +49,16 @@ import type { SavedCaptureImage } from "@/types";
  * three stages pass.
  */
 export interface AddCapturePanelProps {
+  /**
+   * CONTROLLED MODE: When `open` is provided, the parent controls the modal
+   * visibility. The trigger button is NOT rendered (the parent provides its
+   * own button). This is used by the Try-On Camera page's sidebar.
+   *
+   * UNCONTROLLED MODE: When `open` is NOT provided (undefined), the component
+   * manages its own visibility AND renders its own trigger button ("Add Person").
+   * This is used by the Captures Gallery page.
+   */
+  open?: boolean;
   /** Fired when the modal opens — used by the camera screen to release the camera. */
   onModalOpen?: () => void;
   /** Fired when the modal closes (after success, cancel, or backdrop click). */
@@ -76,16 +89,25 @@ const ALLOWED_MIME = [
   "image/gif",
 ];
 
-export function AddCapturePanel({ onClose, onModalOpen }: AddCapturePanelProps) {
+export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen }: AddCapturePanelProps) {
   const settings = useAuthStore((s) => s.settings);
   const addSavedImage = useAuthStore((s) => s.addSavedImage);
   const logActivity = useAuthStore((s) => s.logActivity);
   const { compress } = useImageCompression();
   const { detect, checkPose } = usePoseDetection();
+  const { toast } = useToast();
+
+  // CONTROLLED vs UNCONTROLLED mode:
+  // - If `controlledOpen` is provided (not undefined), the parent controls
+  //   the modal visibility. We don't render the trigger button.
+  // - If `controlledOpen` is undefined, we manage our own `internalOpen`
+  //   state and render the trigger button (uncontrolled mode).
+  const isControlled = controlledOpen !== undefined;
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = isControlled ? (controlledOpen as boolean) : internalOpen;
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [urlValue, setUrlValue] = useState("");
-  const [open, setOpen] = useState(false);
   const [success, setSuccess] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -117,7 +139,8 @@ export function AddCapturePanel({ onClose, onModalOpen }: AddCapturePanelProps) 
   }, []);
 
   const openModal = () => {
-    setOpen(true);
+    logger.interaction("Add person image modal opened", { component: "AddCapturePanel" });
+    if (!isControlled) setInternalOpen(true);
     setSuccess(false);
     reset();
     onModalOpen?.();
@@ -125,7 +148,7 @@ export function AddCapturePanel({ onClose, onModalOpen }: AddCapturePanelProps) 
 
   const closeModal = () => {
     if (isProcessing) return;
-    setOpen(false);
+    if (!isControlled) setInternalOpen(false);
     setSuccess(false);
     setUrlValue("");
     setPreviewImage(null);
@@ -155,12 +178,40 @@ export function AddCapturePanel({ onClose, onModalOpen }: AddCapturePanelProps) 
       setIsProcessing(true);
       setFailure(null);
       try {
-        // STAGE 1 — person existence
-        setStage("stage1", { status: "active", detail: `Running ${settings.activeModelId}` });
+        // ─── MODEL STATUS PRE-CHECK ──────────────────────────────────────
+        // Before running any stages, verify the required models are downloaded.
+        // If not, show an error immediately — don't attempt detection.
+        const personModelReady = isModelDownloaded(settings.personDetectionModelId);
+        const postureModelReady = isModelDownloaded(settings.postureModelId);
+        if (!personModelReady || !postureModelReady) {
+          const missing: string[] = [];
+          if (!personModelReady) missing.push("Person detection");
+          if (!postureModelReady) missing.push("Posture estimation");
+          setStage("stage1", { status: "failed", detail: "Model not downloaded" });
+          setFailure({
+            title: "Please download the model first",
+            howToFix: `The following model(s) are not downloaded: ${missing.join(", ")}. Go to Settings → Model downloads and click Download. The default model (YOLOv8n Pose) is recommended.`,
+            stageId: "stage1",
+          });
+          logActivity({
+            category: "model",
+            label: "Validation blocked — model not downloaded",
+            detail: missing.join(", "),
+            level: "error",
+          });
+          return false;
+        }
+
+        // STAGE 1 — person existence (uses personDetectionModelId + its params)
+        setStage("stage1", { status: "active", detail: `Running ${settings.personDetectionModelId}` });
         const detection = await detect(
           dataUrl,
-          settings.activeModelId,
-          settings.poseThresholds.personScore,
+          settings.personDetectionModelId,
+          settings.personDetectionParams.confidenceThreshold,
+          {
+            nmsIouThreshold: settings.personDetectionParams.nmsIouThreshold,
+            maxPersons: settings.personDetectionParams.maxPersons,
+          },
         );
         if (detection.kind === "no-person") {
           setStage("stage1", { status: "failed", detail: "No person detected" });
@@ -212,13 +263,18 @@ export function AddCapturePanel({ onClose, onModalOpen }: AddCapturePanelProps) 
           detail: `${compressed.sizeKb.toFixed(0)} KB · ${compressed.strategy}`,
         });
 
-        // STAGE 3 — posture check (shoulder tilt / face yaw+pitch / body visibility)
-        setStage("stage3", { status: "active", detail: "Shoulders · face · body" });
-        // Re-run detection on the compressed image to get clean keypoints.
+        // STAGE 3 — posture check (uses postureModelId, separate from Stage 1)
+        setStage("stage3", { status: "active", detail: `Using ${settings.postureModelId}` });
+        // Re-run detection on the compressed image to get clean keypoints,
+        // using the POSTURE model (not the person-detection model).
         const stage3 = await detect(
           compressed.dataUrl,
-          settings.activeModelId,
-          settings.poseThresholds.personScore,
+          settings.postureModelId,
+          settings.personDetectionParams.confidenceThreshold,
+          {
+            nmsIouThreshold: settings.personDetectionParams.nmsIouThreshold,
+            maxPersons: settings.personDetectionParams.maxPersons,
+          },
         );
         const keypoints =
           stage3.kind === "ok" ? stage3.keypoints : detection.kind === "ok" ? detection.keypoints : [];
@@ -272,12 +328,20 @@ export function AddCapturePanel({ onClose, onModalOpen }: AddCapturePanelProps) 
           detail: msg,
           level: "error",
         });
+        // Show a toast for all validation errors (including timeouts) so the
+        // user gets immediate feedback even if they're not looking at the
+        // modal's failure state.
+        toast({
+          title: "Validation error",
+          description: msg,
+          variant: "destructive",
+        });
         return false;
       } finally {
         setIsProcessing(false);
       }
     },
-    [addSavedImage, checkPose, compress, detect, logActivity, settings],
+    [addSavedImage, checkPose, compress, detect, logActivity, settings, toast],
   );
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -375,17 +439,21 @@ export function AddCapturePanel({ onClose, onModalOpen }: AddCapturePanelProps) 
         className="hidden"
       />
 
-      {/* Trigger */}
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={openModal}
-        className="gap-1.5 h-9 text-xs"
-        disabled={isProcessing}
-      >
-        {isProcessing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-        {isProcessing ? "Validating…" : "Add image"}
-      </Button>
+      {/* Trigger — only rendered in UNCONTROLLED mode (when the parent
+          doesn't provide an `open` prop). In controlled mode, the parent
+          provides its own trigger button and controls visibility via `open`. */}
+      {!isControlled && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={openModal}
+          className="gap-1.5 h-9 text-xs"
+          disabled={isProcessing}
+        >
+          {isProcessing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+          {isProcessing ? "Validating…" : "Add Person"}
+        </Button>
+      )}
 
       <AnimatePresence>
         {open && (

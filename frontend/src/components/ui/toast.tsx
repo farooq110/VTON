@@ -53,12 +53,15 @@ export function useToast(): {
   return { toast: ctx.toast, dismiss: ctx.dismiss, toasts: ctx.toasts };
 }
 
-/** Toaster — renders all active toasts. Mount once near the root. */
+/** Toaster — renders all active toasts. Mount once near the root.
+ *
+ * Positioned at TOP-RIGHT of the viewport (was bottom-right). All success
+ * and error toasts appear here so the user always knows where to look. */
 export function Toaster() {
   const ctx = React.useContext(ToastContext);
   if (!ctx) return null;
   return (
-    <div className="pointer-events-none fixed bottom-0 right-0 z-[100] flex max-h-screen w-full flex-col-reverse gap-2 p-4 sm:max-w-sm">
+    <div className="pointer-events-none fixed top-0 right-0 z-[10000] flex max-h-screen w-full flex-col gap-2 p-4 sm:max-w-sm">
       {ctx.toasts.map((t) => (
         <div
           key={t.id}

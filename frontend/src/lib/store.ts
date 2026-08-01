@@ -11,7 +11,7 @@ import type {
   TryOnSettings,
   User,
 } from "@/types";
-import { DEFAULT_SETTINGS, FALLBACK_BRAND } from "@/lib/constants";
+import { DEFAULT_SETTINGS, FALLBACK_BRAND, migrateSettings } from "@/lib/constants";
 import { EMPTY_FILTERS } from "@/types";
 import { uid } from "@/lib/utils";
 
@@ -191,8 +191,21 @@ export const useAuthStore = create<AppState>()(
       isAuthed: false,
       setUser: (user) => set({ user, isAuthed: !!user }),
       signOut: () => {
+        // HARD sign-out — clears ALL auth state so the user can't get
+        // stuck in a redirect loop between /signin and /home.
+        //
+        // 1. Remove the JWT token from localStorage
         localStorage.removeItem("nova_token");
+        // 2. Remove the ENTIRE persisted store so stale isAuthed=true
+        //    can't survive a page reload. Zustand's persist middleware
+        //    will re-create an empty store on next load.
+        localStorage.removeItem("atelier-nova-tryon");
+        // 3. Clear in-memory state
         set({ user: null, isAuthed: false, activeCaptureId: null, lastResult: null });
+        // 4. Notify the app to clear TanStack Query cache (App.tsx listens)
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("auth:hard-signout"));
+        }
       },
 
       brand: FALLBACK_BRAND,
@@ -285,6 +298,8 @@ export const useAuthStore = create<AppState>()(
                 durationMs: entry.durationMs,
                 detail: entry.detail,
                 level: entry.level ?? "info",
+                tip: entry.tip,
+                component: entry.component,
               },
               ...s.activityLog,
             ].slice(0, 500),
@@ -313,8 +328,19 @@ export const useAuthStore = create<AppState>()(
       // Track hydration so the app can show a loading screen until the
       // persisted state is fully rehydrated from localStorage. Without this,
       // the user briefly sees /signin before being redirected to /home.
+      //
+      // MIGRATION: Old persisted settings only had `activeModelId`. The new
+      // schema has separate `personDetectionModelId` + `postureModelId` +
+      // `personDetectionParams`. `migrateSettings()` bridges the gap so
+      // existing users don't lose their preferences on upgrade.
       onRehydrateStorage: () => (state) => {
-        if (state) state._hydrated = true;
+        if (state) {
+          // Migrate old settings schema → new schema (if needed).
+          if (state.settings) {
+            state.settings = migrateSettings(state.settings);
+          }
+          state._hydrated = true;
+        }
       },
     },
   ),

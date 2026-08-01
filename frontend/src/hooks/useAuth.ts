@@ -58,12 +58,19 @@ export function useAuth() {
     },
     onSuccess: (payload) => {
       localStorage.setItem("nova_token", payload.token);
+      // Dispatch a custom event so the useHasToken hook in App.tsx picks up
+      // the new token IMMEDIATELY (in the same tab). Without this, the
+      // route guard still sees hasToken=false (localStorage.setItem doesn't
+      // fire a 'storage' event in the SAME tab — only in other tabs) and
+      // bounced the user back to /signin. A page refresh fixed it because
+      // the hook's initializer re-read localStorage — but we don't want to
+      // require a refresh.
+      window.dispatchEvent(new CustomEvent("auth:token-set"));
       setUser(payload.user);
       logger.auth("Sign-in succeeded", { detail: `user: ${payload.user.email} · role: ${payload.user.role}` });
       // Defer the navigate to the next tick so the Zustand state update
-      // (isAuthed = true) flushes before the route guard re-evaluates.
-      // Without this, the route guard may still see isAuthed=false and
-      // bounce the user back to /signin.
+      // (isAuthed = true) + the hasToken re-check flush before the route
+      // guard re-evaluates.
       setTimeout(() => navigate("/home", { replace: true }), 0);
     },
     onError: (err: any) => {

@@ -1,28 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { logger } from "@/lib/logger";
+import {
+  isModelDownloaded,
+  markModelDownloaded,
+  markModelUninstalled,
+  uninstallModelCache,
+  onModelDownloadChange,
+  getDownloadedModels,
+  isModelUninstalled,
+} from "@/lib/model-persistence";
 import type { DetectionModelId, PoseThresholds } from "@/types";
 
 /**
- * usePoseDetection — in-browser pose detection using `@huggingface/transformers`
- * with `AutoModel` + `AutoProcessor` (raw ONNX inference).
+ * usePoseDetection — in-browser pose detection using a WEB WORKER.
  *
- * **Why AutoModel (not pipeline())?**
- * The `pipeline()` function checks the model's `model_type` against a registry
- * of supported architectures and throws `Unsupported model type: yolov8` for
- * `Xenova/yolov8n-pose`. However, the underlying ONNX model CAN be loaded +
- * run via `AutoModel.from_pretrained()` which skips the pipeline-task check.
+ * All heavy work (model download, transformers.js load, ONNX inference, NMS)
+ * is delegated to `pose-detection.worker.ts` so the main thread never janks.
  *
- * **Output parsing:**
- * YOLOv8-pose raw ONNX output shape: [1, 56, num_anchors]
- *   - 56 = 4 (bbox: cx, cy, w, h) + 1 (confidence) + 51 (17 keypoints × 3)
- *   - Each anchor is a candidate detection
- *   - We filter by confidence threshold + apply NMS (Non-Maximum Suppression)
- *     to remove overlapping detections
- *   - The confidence is at index 4 of each anchor's 56-value vector
- *   - WITHOUT proper NMS, every anchor above threshold counts as a "person"
- *     → causes false "multi-person" errors (10, 40, etc.)
+ * ─── PERSISTENCE (survives page refresh) ────────────────────────────────
+ * The set of downloaded models is tracked in `model-persistence.ts` which
+ * mirrors it to localStorage AND verifies against the browser's Cache
+ * Storage on startup. So:
+ *   - Download a model in Settings → it's marked downloaded
+ *   - Refresh the page → the model is STILL marked downloaded (localStorage)
+ *   - The worker re-attaches to the existing Cache Storage weights — no
+ *     re-download needed
  *
- * **Loading:** `@huggingface/transformers@3.0.2` loaded from CDN `+esm` endpoint.
+ * ─── SINGLE SOURCE OF TRUTH ─────────────────────────────────────────────
+ * Settings page, Try-On Camera page, and validation hooks ALL read from
+ * the same `isModelDownloaded()` function. No more "download again?"
+ * prompts on the camera page after downloading in settings.
+ *
+ * ─── SEPARATE MODELS ────────────────────────────────────────────────────
+ * The caller passes a `modelId` to both `detect()` and `preloadModel()`.
+ * The Settings page passes `personDetectionModelId` for Stage 1 and
+ * `postureModelId` for Stage 3 — they can be the same or different.
+ * Downloading a model makes it available for BOTH stages (shared cache).
  */
 
 export type PersonDetectionResult =
@@ -48,252 +61,135 @@ export interface PoseCheckResult {
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
-const MODEL_REPO: Record<DetectionModelId, string> = {
-  "yolov8n-pose": "Xenova/yolov8n-pose",
-  "yolov8s-pose": "Xenova/yolov8s-pose",
-  "mediapipe-pose": "Xenova/yolov8n-pose",
-  "movenet-lightning": "Xenova/yolov8n-pose",
-};
+export interface DetectOptions {
+  /** IoU threshold for NMS (default 0.5). */
+  nmsIouThreshold?: number;
+  /** Max persons to return (default 10). */
+  maxPersons?: number;
+}
 
-const TRANSFORMERS_CDN_URLS = [
-  "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2/+esm",
-  "https://esm.run/@huggingface/transformers@3.0.2",
-  "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.0/+esm",
-];
+// ─── Module-level pending-loads map ──────────────────────────────────── //
+// SHARED across ALL hook instances. Used by preloadModel() to track
+// "load" requests. The worker's central onmessage handler resolves
+// these when it receives "loaded" messages.
+const pendingLoads = new Map<
+  DetectionModelId,
+  { resolve: () => void; reject: (e: Error) => void; progressCb?: (p: number) => void }
+>();
 
-const COCO_KEYPOINT_NAMES = [
-  "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-  "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-  "left_wrist", "right_wrist", "left_hip", "right_hip",
-  "left_knee", "right_knee", "left_ankle", "right_ankle",
-];
+// ─── Module-level pending-detects map ────────────────────────────────── //
+// SHARED across ALL hook instances. This fixes the "first detect stays
+// pending" bug: previously, each hook instance had its own
+// `pendingDetectsRef` Map. When a component using the hook re-mounted
+// (e.g. due to route change or parent re-render), the old instance's
+// pending requests were orphaned — the worker eventually posted the
+// detect-result, but the new hook instance's listener didn't recognize
+// the reqId (it was in the old instance's Map). The promise never
+// resolved → "stuck pending".
+//
+// By making this module-level, ALL hook instances share the same Map.
+// The worker's detect-result message is routed to the correct resolve/
+// reject callback regardless of which hook instance is currently
+// listening.
+const pendingDetects = new Map<
+  number,
+  { resolve: (d: PersonDetectionResult) => void; reject: (e: Error) => void }
+>();
+let nextReqId = 1;
 
-const MODEL_LOAD_TIMEOUT_MS = 60_000;
+// ─── Module-level worker singleton (one worker for the whole app) ────── //
+// The worker is created ONCE on first use and NEVER terminated for the
+// rest of the app session. This ensures transformers.js + model weights
+// stay in the worker's in-memory cache across route changes — no
+// re-downloading, no re-loading.
+let workerSingleton: Worker | null = null;
 
-// ─── Module-level caches ────────────────────────────────────────────── //
-const modelCache = new Map<DetectionModelId, { model: any; processor: any }>();
-const inFlightLoads = new Map<DetectionModelId, Promise<{ model: any; processor: any }>>();
-const loadedModels = new Set<DetectionModelId>();
-
-type ModelCacheListener = (modelId: DetectionModelId, isCached: boolean) => void;
+type ModelCacheListener = (modelId: DetectionModelId, isDownloaded: boolean) => void;
 const modelCacheListeners = new Set<ModelCacheListener>();
 
-function notifyModelCacheChange(modelId: DetectionModelId, isCached: boolean) {
-  modelCacheListeners.forEach((fn) => fn(modelId, isCached));
+function notifyModelCacheChange(modelId: DetectionModelId, isDownloaded: boolean) {
+  modelCacheListeners.forEach((fn) => fn(modelId, isDownloaded));
 }
 
-// ─── CDN module loading ────────────────────────────────────────────── //
-let transformersModule: any = null;
-let transformersLoading: Promise<any> | null = null;
+/**
+ * Lazily creates the pose-detection worker. Reused across all hook instances
+ * so the model cache inside the worker survives route changes.
+ *
+ * The worker's `onmessage` handler is set ONCE (when the worker is created).
+ * It routes ALL message types — including `detect-result` and `progress` —
+ * using the module-level `pendingDetects` map. This ensures detect results
+ * are always delivered to the correct caller, even if the hook instance
+ * that initiated the detect has unmounted.
+ */
+function getWorker(): Worker {
+  if (workerSingleton) return workerSingleton;
+  workerSingleton = new Worker(
+    new URL("../workers/pose-detection.worker.ts", import.meta.url),
+    { type: "module" },
+  );
 
-async function loadTransformers(): Promise<any> {
-  if (transformersModule) return transformersModule;
-  if (transformersLoading) return transformersLoading;
+  // ─── SINGLE message handler for ALL message types ────────────────────
+  // This handler is set ONCE when the worker is created and never removed.
+  // It handles EVERY message type — loaded, log, error, progress,
+  // detect-result — so there's no need for per-hook addEventListener
+  // listeners. This eliminates the "first detect stays pending" bug where
+  // the per-hook listener was removed on unmount before the result arrived.
+  workerSingleton.onmessage = (e: MessageEvent) => {
+    const msg = e.data;
+    if (!msg || typeof msg !== "object") return;
 
-  transformersLoading = (async () => {
-    for (const url of TRANSFORMERS_CDN_URLS) {
-      try {
-        logger.model("Loading transformers.js from CDN", { detail: url });
-        const mod: any = await Promise.race([
-          import(/* @vite-ignore */ url),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Timeout (30s)")), 30_000),
-          ),
-        ]);
-        if (mod && typeof mod.AutoModel === "function") {
-          mod.env.allowLocalModels = false;
-          (window as any).transformers = mod;
-          logger.model("transformers.js loaded from CDN", { detail: url });
-          transformersModule = mod;
-          return mod;
+    switch (msg.type) {
+      case "loaded": {
+        markModelDownloaded(msg.modelId as DetectionModelId);
+        notifyModelCacheChange(msg.modelId as DetectionModelId, true);
+        // Resolve any pending preloadModel() call for this model.
+        const pendingLoad = pendingLoads.get(msg.modelId as DetectionModelId);
+        if (pendingLoad) {
+          pendingLoads.delete(msg.modelId as DetectionModelId);
+          pendingLoad.resolve();
         }
-        logger.model("CDN loaded but AutoModel missing", { detail: url, level: "warn" });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "unknown error";
-        logger.model("CDN failed, trying next", { detail: `${url}: ${msg}`, level: "warn" });
+        break;
       }
-    }
-    transformersLoading = null;
-    throw new Error("Could not load transformers.js from any CDN. Check your internet connection.");
-  })();
-
-  return transformersLoading;
-}
-
-/**
- * Loads model + processor via AutoModel (bypasses pipeline() task-check).
- */
-async function getModelAndProcessor(
-  modelId: DetectionModelId,
-  onProgress?: (p: number) => void,
-): Promise<{ model: any; processor: any }> {
-  if (modelCache.has(modelId)) return modelCache.get(modelId)!;
-  if (inFlightLoads.has(modelId)) return inFlightLoads.get(modelId)!;
-
-  const loadPromise = (async () => {
-    const startTime = Date.now();
-    const repo = MODEL_REPO[modelId];
-    logger.model(`Loading model: ${modelId}`, { detail: `repo: ${repo} (via AutoModel)` });
-
-    const transformers = await loadTransformers();
-    const { AutoModel, AutoProcessor } = transformers;
-
-    const progressCb = (data: any) => {
-      if (data?.progress != null && onProgress) {
-        onProgress(Math.min(1, data.progress / 100));
+      case "progress": {
+        // Route progress to the pending load's progressCb (if any).
+        const pl = pendingLoads.get(msg.modelId as DetectionModelId);
+        if (pl?.progressCb) {
+          pl.progressCb(msg.progress);
+        }
+        break;
       }
-    };
-
-    const [processor, model] = await Promise.all([
-      AutoProcessor.from_pretrained(repo, { progress_callback: progressCb }),
-      AutoModel.from_pretrained(repo, { progress_callback: progressCb }),
-    ]);
-
-    if (!model || !processor) {
-      throw new Error("Model or processor returned undefined");
-    }
-
-    modelCache.set(modelId, { model, processor });
-    loadedModels.add(modelId);
-    notifyModelCacheChange(modelId, true);
-    logger.model(`Model loaded: ${modelId}`, {
-      detail: `Cached in memory · ${((Date.now() - startTime) / 1000).toFixed(1)}s`,
-      durationMs: Date.now() - startTime,
-    });
-    return { model, processor };
-  })();
-
-  inFlightLoads.set(modelId, loadPromise);
-  try {
-    return await loadPromise;
-  } finally {
-    inFlightLoads.delete(modelId);
-  }
-}
-
-/**
- * Computes Intersection over Union (IoU) between two bounding boxes.
- * Used for NMS (Non-Maximum Suppression) to remove overlapping detections.
- */
-function computeIoU(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): number {
-  const ax1 = a.x - a.w / 2, ay1 = a.y - a.h / 2, ax2 = a.x + a.w / 2, ay2 = a.y + a.h / 2;
-  const bx1 = b.x - b.w / 2, by1 = b.y - b.h / 2, bx2 = b.x + b.w / 2, by2 = b.y + b.h / 2;
-
-  const ix1 = Math.max(ax1, bx1), iy1 = Math.max(ay1, by1);
-  const ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
-  const iw = Math.max(0, ix2 - ix1), ih = Math.max(0, iy2 - iy1);
-  const intersection = iw * ih;
-  const union = a.w * a.h + b.w * b.h - intersection;
-  return union > 0 ? intersection / union : 0;
-}
-
-/**
- * Non-Maximum Suppression — removes overlapping detections, keeping only
- * the highest-confidence one in each cluster.
- */
-function nms(detections: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }>, iouThreshold = 0.5): Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> {
-  const sorted = [...detections].sort((a, b) => b.score - a.score);
-  const kept: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> = [];
-  for (const det of sorted) {
-    let keep = true;
-    for (const k of kept) {
-      if (computeIoU(det.bbox, k.bbox) > iouThreshold) {
-        keep = false;
+      case "detect-result": {
+        const pending = pendingDetects.get(msg.reqId);
+        if (!pending) return;
+        pendingDetects.delete(msg.reqId);
+        if (msg.ok) {
+          pending.resolve(msg.detection as PersonDetectionResult);
+        } else {
+          pending.reject(new Error(msg.error ?? "Detection failed"));
+        }
+        break;
+      }
+      case "log": {
+        const level = msg.level as "info" | "warn" | "error";
+        const consoleMsg = `[WORKER][${msg.category}] ${msg.message}`;
+        if (level === "error") console.error(consoleMsg);
+        else if (level === "warn") console.warn(consoleMsg);
+        else console.log(consoleMsg);
+        logger.model(`[worker] ${msg.message}`, { level });
+        break;
+      }
+      case "error": {
+        logger.model(`[worker] ${msg.message}`, { level: "error" });
         break;
       }
     }
-    if (keep) kept.push(det);
-  }
-  return kept;
-}
+  };
 
-/**
- * Parses the raw YOLOv8-pose output tensor into detections.
- *
- * Output shape: [1, 56, num_anchors] (e.g., [1, 56, 8400] for 640×640 input)
- *   - dim[1] = 56 features per anchor:
- *     [0..3] = bbox (cx, cy, w, h) — normalized to 0..1
- *     [4]    = confidence score (0..1)
- *     [5..56] = 17 keypoints × 3 (x, y, score) — in pixel coords of 640×640 input
- *   - dim[2] = num_anchors (8400 for 640×640)
- *
- * The data layout is [feature, anchor] — i.e., data[anchor_idx + feature_idx * num_anchors]
- *
- * Steps:
- *   1. Extract all anchors with confidence >= minScore
- *   2. Apply NMS (IoU > 0.5) to remove overlapping boxes
- *   3. Extract keypoints from the top detections
- */
-function parseYolov8PoseOutput(
-  outputTensor: any,
-  minScore: number,
-  imgWidth: number,
-  imgHeight: number,
-): { persons: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> } {
-  const data: Float32Array = outputTensor.data;
-  const dims: number[] = outputTensor.dims;
+  workerSingleton.onerror = (err) => {
+    logger.model(`[worker] fatal error: ${err.message}`, { level: "error" });
+  };
 
-  // Expected: [1, 56, num_anchors]
-  if (dims.length !== 3) {
-    logger.model(`Unexpected YOLOv8 output dims: ${JSON.stringify(dims)}`, { level: "warn" });
-    return { persons: [] };
-  }
-
-  const numFeatures = dims[1]; // 56
-  const numAnchors = dims[2];  // 8400
-  const numKp = 17;
-  const expectedFeatures = 4 + 1 + numKp * 3; // 56
-
-  if (numFeatures !== expectedFeatures) {
-    logger.model(`Unexpected features: ${numFeatures} (expected ${expectedFeatures})`, { level: "warn" });
-    return { persons: [] };
-  }
-
-  // Step 1: Extract candidate detections with confidence >= minScore
-  const candidates: Array<{ score: number; keypoints: PoseKeypoint[]; bbox: any }> = [];
-
-  for (let a = 0; a < numAnchors; a++) {
-    // Confidence is at feature index 4, laid out as data[4 * numAnchors + a]
-    const conf = data[4 * numAnchors + a];
-    if (conf < minScore) continue;
-
-    // Bbox: cx, cy, w, h (feature indices 0-3)
-    const cx = data[0 * numAnchors + a];
-    const cy = data[1 * numAnchors + a];
-    const w = data[2 * numAnchors + a];
-    const h = data[3 * numAnchors + a];
-
-    // Keypoints: 17 × 3 (x, y, score) starting at feature index 5
-    const keypoints: PoseKeypoint[] = [];
-    for (let kp = 0; kp < numKp; kp++) {
-      const base = 5 + kp * 3;
-      // Keypoint coords are in the model's input pixel space (640×640)
-      // Normalize to 0..1 relative to the original image
-      const kx = data[base * numAnchors + a] / imgWidth;
-      const ky = data[(base + 1) * numAnchors + a] / imgHeight;
-      const ks = data[(base + 2) * numAnchors + a];
-      keypoints.push({
-        name: COCO_KEYPOINT_NAMES[kp] ?? `kp_${kp}`,
-        x: kx,
-        y: ky,
-        score: ks,
-      });
-    }
-
-    candidates.push({
-      score: conf,
-      keypoints,
-      bbox: { x: cx, y: cy, w, h },
-    });
-  }
-
-  logger.model(`YOLOv8 raw: ${candidates.length} candidates above ${minScore} confidence`, { level: "info" });
-
-  // Step 2: Apply NMS to remove overlapping detections
-  const suppressed = nms(candidates, 0.5);
-
-  // Step 3: Return the filtered detections
-  return { persons: suppressed };
+  return workerSingleton;
 }
 
 export function usePoseDetection() {
@@ -301,85 +197,142 @@ export function usePoseDetection() {
   const [modelStatus, setModelStatus] = useState<ModelStatus>("idle");
   const [modelProgress, setModelProgress] = useState(0);
   const [activeModelId, setActiveModelId] = useState<DetectionModelId | null>(null);
+  // Force a re-render whenever the persistence layer notifies a change.
   const [, forceRerender] = useState(0);
 
-  const listenerRef = useRef<ModelCacheListener | null>(null);
-  if (!listenerRef.current) {
-    listenerRef.current = () => forceRerender((n) => n + 1);
-    modelCacheListeners.add(listenerRef.current);
-  }
+  // ─── Subscribe to persistence-layer changes (mount-once).
+  // The worker's onmessage handler is set ONCE at module level (in
+  // getWorker) and handles ALL message types using the module-level
+  // `pendingDetects` map. No per-hook listener is needed — this
+  // eliminates the "first detect stays pending" bug.
   useEffect(() => {
-    return () => {
-      if (listenerRef.current) modelCacheListeners.delete(listenerRef.current);
-    };
-  }, []);
+    // Ensure the worker exists (creates it if this is the first consumer).
+    getWorker();
 
+    // Subscribe to persistence-layer changes (download / uninstall from
+    // ANY hook instance or even from outside the hook).
+    const cacheListener: ModelCacheListener = () => forceRerender((n) => n + 1);
+    modelCacheListeners.add(cacheListener);
+    const persistUnsub = onModelDownloadChange(cacheListener);
+
+    return () => {
+      // Only remove the persistence subscription — do NOT terminate the
+      // worker and do NOT remove the worker's onmessage handler. The
+      // worker stays alive for the whole session with its handler intact.
+      modelCacheListeners.delete(cacheListener);
+      persistUnsub();
+    };
+  }, []); // ← empty deps = mount-once
+
+  /**
+   * Runs person detection on an image. Returns the detection result
+   * (ok / no-person / multi-person) + keypoints if a person is found.
+   *
+   * The `modelId` parameter lets the caller pick WHICH model to use:
+   *   - Stage 1 (person detection) → pass `personDetectionModelId`
+   *   - Stage 3 (posture) → pass `postureModelId`
+   * Both can be the same model — the download is shared.
+   *
+   * MODEL STATUS CHECK: If the model is NOT marked as downloaded (via the
+   * persistence layer), this throws an error "Please download the model
+   * first" — it does NOT auto-download. The caller (useImageValidation,
+   * AddCapturePanel, etc.) should catch this and show the error to the user.
+   *
+   * MODEL LOADS ONLY ONCE: If the model IS downloaded, we post "detect"
+   * directly. The worker's `runDetection` → `getModelAndProcessor`:
+   *   - Returns instantly if the model is in the worker's in-memory cache
+   *     (warm from startup or previous detection)
+   *   - Loads from the browser's Cache Storage (fast, no network) if the
+   *     weights are cached but not in memory
+   *   - Downloads from the CDN (slow, network) only if neither cache has it
+   *
+   * DETECTION TIMEOUT: 120s. The first detection after app startup may need
+   * to load the model weights from Cache Storage into the worker's memory
+   * (which can take 5-15s for a 3MB model). Subsequent detections use the
+   * in-memory cache and are fast (<1s).
+   */
   const detect = useCallback(
-    async (imageDataUrl: string, modelId: DetectionModelId, minScore = 0.6): Promise<PersonDetectionResult> => {
+    async (
+      imageDataUrl: string,
+      modelId: DetectionModelId,
+      minScore = 0.6,
+      opts?: DetectOptions,
+    ): Promise<PersonDetectionResult> => {
       setActiveModelId(modelId);
-      setModelStatus("loading");
-      setModelProgress(0);
+
+      // ─── MODEL STATUS CHECK ────────────────────────────────────────────
+      // If the model is NOT downloaded, throw an error immediately. Do NOT
+      // auto-download — the user must download it from Settings first.
+      // The caller catches this and shows "Please download the model first".
+      if (!isModelDownloaded(modelId)) {
+        const errMsg = "Please download the model first from Settings before capturing or uploading an image.";
+        logger.model(`Detection blocked — model not downloaded: ${modelId}`, {
+          detail: errMsg,
+          level: "error",
+          tip: "Go to Settings → Model downloads → click Download next to a model. The default model (YOLOv8n Pose) is recommended and auto-downloads on app startup.",
+        });
+        throw new Error(errMsg);
+      }
+
       try {
-        const { model, processor } = await Promise.race([
-          getModelAndProcessor(modelId, (p) => setModelProgress(p)),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error("Model is taking too long to load (over 60s). Check your connection or skip validation.")),
-              MODEL_LOAD_TIMEOUT_MS,
-            ),
-          ),
-        ]);
+        const worker = getWorker();
         setModelStatus("ready");
         setModelProgress(1);
 
-        const { RawImage } = transformersModule!;
-        const image = await RawImage.fromURL(imageDataUrl);
+        // Post "detect" directly — the worker's runDetection will use the
+        // in-memory cache if warm, or load from Cache Storage (fast, no
+        // network re-download). If neither cache has it (shouldn't happen
+        // since we checked isModelDownloaded above), it downloads from CDN.
+        //
+        // Uses the MODULE-LEVEL `pendingDetects` map + `nextReqId` counter
+        // so the result is routed to the correct resolve/reject callback
+        // even if this hook instance unmounts before the worker responds.
+        const reqId = nextReqId++;
+        const result = await new Promise<PersonDetectionResult>((resolve, reject) => {
+          pendingDetects.set(reqId, { resolve, reject });
+          worker.postMessage({
+            type: "detect",
+            modelId,
+            imageDataUrl,
+            minScore,
+            reqId,
+            nmsIouThreshold: opts?.nmsIouThreshold ?? 0.5,
+            maxPersons: opts?.maxPersons ?? 10,
+          });
 
-        const inferStart = Date.now();
-        const inputs = await processor(image);
-
-        // Remap: processor outputs `pixel_values`, model expects `images`
-        const modelInputs: Record<string, any> = {};
-        if (inputs.pixel_values !== undefined) {
-          modelInputs.images = inputs.pixel_values;
-        }
-        for (const [key, value] of Object.entries(inputs)) {
-          if (key !== "pixel_values" && key !== "images") {
-            modelInputs[key] = value;
-          }
-        }
-
-        const outputs = await model(modelInputs);
-
-        // YOLOv8-pose output is typically `output0`
-        const outputTensor = outputs.output0 ?? outputs.output ?? outputs[Object.keys(outputs)[0]];
-        if (!outputTensor) {
-          throw new Error("Model output missing detection tensor");
-        }
-
-        const { persons } = parseYolov8PoseOutput(
-          outputTensor,
-          minScore,
-          image.width,
-          image.height,
-        );
-
-        logger.model(`Detection complete: ${modelId}`, {
-          detail: `${persons.length} person(s) detected · ${(Date.now() - inferStart)}ms inference`,
-          durationMs: Date.now() - inferStart,
+          // 30s timeout — transformers.js + the model are pre-loaded on app
+          // startup (worker pre-load + warmDownloadedModels), so detection
+          // should take <5s. If it exceeds 30s, something is wrong — reject
+          // with a timeout error so the UI can surface it.
+          setTimeout(() => {
+            if (pendingDetects.has(reqId)) {
+              pendingDetects.delete(reqId);
+              reject(new Error("Validation timed out (30s). The model may still be loading. Please try again in a few seconds."));
+            }
+          }, 30_000);
         });
 
-        if (persons.length === 0) return { kind: "no-person", score: 0 };
-        if (persons.length > 1) return { kind: "multi-person", personCount: persons.length, score: persons[0].score };
+        if (result.kind === "ok" && result.keypoints) {
+          lastKeyedRef.current = result.keypoints;
+        }
 
-        const person = persons[0];
-        lastKeyedRef.current = person.keypoints;
-        return { kind: "ok", personCount: 1, score: person.score, keypoints: person.keypoints };
+        logger.model(`Detection complete: ${modelId}`, {
+          detail:
+            result.kind === "ok"
+              ? `1 person detected · score ${(result.score * 100).toFixed(0)}%`
+              : result.kind === "multi-person"
+                ? `${result.personCount} persons detected`
+                : "no person detected",
+        });
+
+        return result;
       } catch (e) {
         setModelStatus("error");
+        const errMsg = e instanceof Error ? e.message : "Unknown error";
         logger.model(`Detection failed: ${modelId}`, {
-          detail: e instanceof Error ? e.message : "Unknown error",
+          detail: errMsg,
           level: "error",
+          tip: "If this is the first detection after app startup, the model may still be loading into memory. Wait a few seconds and try again. If the problem persists, check your network connection or re-download the model in Settings.",
         });
         throw e;
       }
@@ -433,26 +386,109 @@ export function usePoseDetection() {
     [],
   );
 
+  /**
+   * Downloads a model (or no-ops if already downloaded). The download is
+   * SHARED — once a model is downloaded, it's available for both Stage 1
+   * (person detection) and Stage 3 (posture), regardless of which section
+   * triggered the download.
+   */
   const preloadModel = useCallback(
     async (modelId: DetectionModelId): Promise<boolean> => {
-      if (loadedModels.has(modelId)) {
-        logger.model(`Model already cached: ${modelId}`, { detail: "No download needed" });
+      if (isModelDownloaded(modelId)) {
+        logger.model(`Model already downloaded: ${modelId}`, { detail: "No download needed" });
         return true;
       }
       setActiveModelId(modelId);
       setModelStatus("loading");
       setModelProgress(0);
       try {
-        await getModelAndProcessor(modelId, (p) => setModelProgress(p));
+        const worker = getWorker();
+
+        // If a load is already in-flight for this model (e.g. from
+        // warmDownloadedModels), piggyback on it instead of sending a
+        // duplicate "load" message. This prevents the "load + load + load"
+        // triple-trigger issue.
+        let loadEntry = pendingLoads.get(modelId);
+        if (!loadEntry) {
+          // Create a new pending load entry + post "load" to the worker.
+          loadEntry = {
+            resolve: () => {},
+            reject: () => {},
+            progressCb: (p: number) => setModelProgress(p),
+          };
+          // We need to set up the promise BEFORE posting the message so the
+          // central onmessage handler can resolve it.
+          const loadPromise = new Promise<void>((resolve, reject) => {
+            loadEntry!.resolve = resolve;
+            loadEntry!.reject = reject;
+          });
+          pendingLoads.set(modelId, loadEntry);
+          worker.postMessage({ type: "load", modelId });
+
+          // Timeout — don't hang forever.
+          setTimeout(() => {
+            const entry = pendingLoads.get(modelId);
+            if (entry) {
+              pendingLoads.delete(modelId);
+              entry.reject(new Error("Model load timed out (120s). Check your network connection."));
+            }
+          }, 120_000);
+
+          await loadPromise;
+        } else {
+          // A load is already in-flight — piggyback on it. Update the
+          // progressCb so this caller's UI also shows progress.
+          loadEntry.progressCb = (p: number) => setModelProgress(p);
+          // Wait for the existing load to complete. We need to create a
+          // new promise that resolves when the existing loadEntry resolves.
+          await new Promise<void>((resolve, reject) => {
+            const origResolve = loadEntry!.resolve;
+            const origReject = loadEntry!.reject;
+            loadEntry!.resolve = () => { origResolve(); resolve(); };
+            loadEntry!.reject = (e: Error) => { origReject(e); reject(e); };
+          });
+        }
+
+        // markModelDownloaded is called by the worker's central onmessage
+        // handler when it posts { type: "loaded" }.
+        markModelDownloaded(modelId);
         setModelStatus("ready");
         setModelProgress(1);
         return true;
       } catch (e) {
         setModelStatus("error");
         const msg = e instanceof Error ? e.message : "Unknown error";
-        logger.model(`Preload failed: ${modelId}`, { detail: msg, level: "error" });
+        logger.model(`Download failed: ${modelId}`, {
+          detail: msg,
+          level: "error",
+          tip: "Check your internet connection. The model loads from a CDN (jsdelivr/esm.sh). If one CDN is blocked, the worker tries alternatives automatically.",
+        });
         return false;
       }
+    },
+    [],
+  );
+
+  /**
+   * Uninstalls a model — removes it from the tracking set AND deletes the
+   * weight files from the browser's Cache Storage. The model can be
+   * re-downloaded later by clicking "Download" again.
+   */
+  const uninstallModel = useCallback(
+    async (modelId: DetectionModelId): Promise<boolean> => {
+      logger.model(`Uninstalling model: ${modelId}`);
+      const ok = await uninstallModelCache(modelId);
+      markModelUninstalled(modelId);
+      notifyModelCacheChange(modelId, false);
+      if (ok) {
+        logger.model(`Model uninstalled: ${modelId}`);
+      } else {
+        logger.model(`Model uninstall partial: ${modelId}`, {
+          level: "warn",
+          tip: "The model was removed from the tracking list, but some cache files may remain. Clear site data in your browser settings to fully remove them.",
+        });
+      }
+      return ok;
     },
     [],
   );
@@ -461,9 +497,102 @@ export function usePoseDetection() {
     detect,
     checkPose,
     preloadModel,
+    uninstallModel,
     modelStatus,
     modelProgress,
     activeModelId,
-    isModelCached: (modelId: DetectionModelId) => loadedModels.has(modelId),
+    /** SINGLE SOURCE OF TRUTH — reads from the persistence layer. */
+    isModelCached: (modelId: DetectionModelId) => isModelDownloaded(modelId),
   };
+}
+
+// ─── Module-level warming function ───────────────────────────────────── //
+/**
+ * GUARD: ensures warming only runs ONCE per app session. Multiple calls
+ * (e.g. from React StrictMode double-invoked effects, or route changes)
+ * return immediately without re-sending "load" messages to the worker.
+ * This is the KEY fix for the "triple trigger" issue — the worker was
+ * receiving 3 "load" messages because warmDownloadedModels was called
+ * multiple times.
+ */
+let warmingStarted = false;
+
+/**
+ * Warms the worker's in-memory cache by sending "load" messages for every
+ * model marked as downloaded in the persistence layer. Called once on app
+ * startup (from App.tsx) so the model is loaded into the worker's memory
+ * IMMEDIATELY — the first detection doesn't have to wait for a Cache Storage
+ * read.
+ *
+ * GUARDED: This function only runs ONCE per app session (module-level
+ * `warmingStarted` flag). Subsequent calls are no-ops. This prevents the
+ * "triple trigger" issue where React StrictMode + route changes caused
+ * multiple "load" messages to be sent to the worker.
+ *
+ * UNINSTALLED MODELS: Models the user has explicitly uninstalled are
+ * skipped — they are NOT auto-re-downloaded. Only a manual "Download"
+ * click in Settings re-downloads them.
+ *
+ * AUTO-DOWNLOAD DEFAULT: If NO models are downloaded AND the default model
+ * has NOT been uninstalled, we auto-download it so the app works
+ * out-of-the-box. If the user has uninstalled the default, we respect that
+ * — no auto-download.
+ */
+export async function warmDownloadedModels(
+  defaultPersonModelId: DetectionModelId,
+  defaultPostureModelId?: DetectionModelId,
+): Promise<void> {
+  // ─── GUARD: only run once per session ────────────────────────────────
+  if (warmingStarted) {
+    logger.model("Model warming already started this session — skipping");
+    return;
+  }
+  warmingStarted = true;
+
+  try {
+    const downloaded = getDownloadedModels();
+    const worker = getWorker();
+
+    // If no models are downloaded at all, auto-download the default(s) —
+    // BUT ONLY if they haven't been explicitly uninstalled.
+    if (downloaded.size === 0) {
+      const modelsToDownload = new Set<DetectionModelId>();
+      if (!isModelUninstalled(defaultPersonModelId)) {
+        modelsToDownload.add(defaultPersonModelId);
+      }
+      if (defaultPostureModelId && !isModelUninstalled(defaultPostureModelId)) {
+        modelsToDownload.add(defaultPostureModelId);
+      }
+
+      if (modelsToDownload.size === 0) {
+        logger.model("No models downloaded and defaults are uninstalled — skipping auto-download (user must manually download from Settings)");
+        return;
+      }
+
+      logger.model(`No models downloaded — auto-downloading: ${Array.from(modelsToDownload).join(", ")}`);
+      // Post "load" for each model. The worker's central onmessage handler
+      // (set in getWorker) receives the "loaded" response and calls
+      // markModelDownloaded. We don't need per-call listeners here — this
+      // eliminates the duplicate addEventListener/removeEventListener
+      // pattern that was causing stale listeners.
+      for (const modelId of modelsToDownload) {
+        worker.postMessage({ type: "load", modelId });
+      }
+      return;
+    }
+
+    // Warm each DOWNLOADED model into the worker's memory.
+    // Models in the "uninstalled" set are NOT in the "downloaded" set, so
+    // they're automatically skipped here.
+    logger.model(`Warming ${downloaded.size} downloaded model(s) into worker memory…`);
+    for (const modelId of downloaded) {
+      worker.postMessage({ type: "load", modelId });
+    }
+    logger.model(`Warming requests sent for ${downloaded.size} model(s)`);
+  } catch (err) {
+    logger.model(`Model warming failed`, {
+      detail: err instanceof Error ? err.message : "Unknown error",
+      level: "warn",
+    });
+  }
 }

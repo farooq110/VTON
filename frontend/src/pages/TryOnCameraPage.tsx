@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { Camera, Check, CheckSquare, Download, Image as ImageIcon, Loader2, Maximize2, RefreshCw, Square, Trash2, X } from "lucide-react";
+import { Camera, Check, CheckSquare, Download, Image as ImageIcon, Loader2, Maximize2, Plus, RefreshCw, Square, Trash2, UserPlus, X } from "lucide-react";
 import { useCamera } from "@/hooks/useCamera";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { useAuthStore } from "@/lib/store";
@@ -10,6 +10,7 @@ import { GlobalHeader } from "@/components/layout/GlobalHeader";
 import { useToast } from "@/components/ui/toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { AddCapturePanel } from "@/components/tryon/AddCapturePanel";
 import { formatBytes, formatRelativeTime, resolveProductImage, onImageError } from "@/lib/utils";
 import { DETECTION_MODELS } from "@/lib/constants";
 import type { SavedCaptureImage } from "@/types";
@@ -19,7 +20,7 @@ type Phase = "intro" | "camera" | "countdown" | "captured-preview";
 export function TryOnCameraPage() {
   const navigate = useNavigate();
   const { data: products } = useProducts();
-  const { savedImages, addSavedImage, removeSavedImage, setActiveCapture, settings, selectedProductId } = useAuthStore();
+  const { savedImages, removeSavedImage, setActiveCapture, settings, selectedProductId } = useAuthStore();
   const { toast } = useToast();
   const { isModelCached, preloadModel, modelProgress } = usePoseDetection();
 
@@ -29,13 +30,13 @@ export function TryOnCameraPage() {
   // (single-source-of-truth: `modelReady` reads from `isModelCached` which
   // is backed by the global `loadedModels` set + pub/sub).
   const [downloadingModel, setDownloadingModel] = useState(false);
-  const activeModel = DETECTION_MODELS.find((m) => m.id === settings.activeModelId);
-  const modelReady = isModelCached(settings.activeModelId);
+  const activeModel = DETECTION_MODELS.find((m) => m.id === settings.personDetectionModelId);
+  const modelReady = isModelCached(settings.personDetectionModelId);
 
   const downloadModel = async () => {
     setDownloadingModel(true);
     // preloadModel returns true on success, false on failure (no throw).
-    const ok = await preloadModel(settings.activeModelId);
+    const ok = await preloadModel(settings.personDetectionModelId);
     setDownloadingModel(false);
     if (ok) {
       toast({ title: "Model downloaded", description: "You can now capture and try on." });
@@ -66,6 +67,9 @@ export function TryOnCameraPage() {
   const [lastSizeKb, setLastSizeKb] = useState(0);
   const [showCaptures, setShowCaptures] = useState(false);
   const [confirmImage, setConfirmImage] = useState<SavedCaptureImage | null>(null);
+  // Add-person modal — opens the AddCapturePanel so the user can add a
+  // person image from disk or URL directly from the camera page sidebar.
+  const [showAddPerson, setShowAddPerson] = useState(false);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ─── Entry guard — must have a selected garment before opening camera ──
@@ -181,20 +185,35 @@ export function TryOnCameraPage() {
     setPhase("intro");
   };
 
-  // Save the captured image to the gallery + immediately start the try-on
-  // pipeline. The validation (stages 1+2+3) runs during processing.
+  // Save the captured image + immediately start the try-on pipeline.
+  // The validation (stages 1+2+3) runs during processing. The image is
+  // NOT saved to the gallery yet — it's stored as a "pending capture" in
+  // sessionStorage. The orchestrator saves it to the gallery ONLY if
+  // validation passes. If validation fails, the image is discarded.
+  //
+  // MODEL CHECK: Before proceeding, verify the model is downloaded. If not,
+  // show a toast "Please download the model first" and don't proceed.
   const saveAndTryOn = () => {
     if (!lastCapture) return;
-    const saved: SavedCaptureImage = {
-      id: `cap_${Date.now()}`,
-      dataUrl: lastCapture,
-      thumbnailUrl: lastCapture,
-      capturedAt: Date.now(),
-      passedAllStages: false,
-      sizeKb: lastSizeKb,
-    };
-    addSavedImage(saved);
-    setActiveCapture(saved.id);
+    if (!modelReady) {
+      toast({
+        title: "Please download the model first",
+        description: "Go to Settings → Model downloads and download a model before capturing.",
+        variant: "destructive",
+      });
+      return;
+    }
+    // Store the pending capture — the orchestrator will save it to the
+    // gallery after validation passes (with passedAllStages: true).
+    sessionStorage.setItem(
+      "nova_pending_capture",
+      JSON.stringify({
+        dataUrl: lastCapture,
+        sizeKb: lastSizeKb,
+        capturedAt: Date.now(),
+      }),
+    );
+    // Don't addSavedImage here — wait for validation.
     // Don't skip stages — the camera-captured image needs full validation.
     sessionStorage.removeItem("nova_skip_stages");
     navigate("/tryon/processing");
@@ -205,15 +224,14 @@ export function TryOnCameraPage() {
     stopCamera();
     if (!product) {
       toast({
-        title: "Select a garment first",
-        description: "Browse the collection and pick a piece to try on.",
+        title: "Select a product first",
+        description: "Browse the collection and pick a garment to try on.",
         variant: "destructive",
       });
-      navigate("/products");
-      return;
+      return; // stay on the camera page — don't navigate away
     }
     setConfirmImage(img);
-  }, [product, navigate, stopCamera, toast]);
+  }, [product, stopCamera, toast]);
 
   const confirmTryOn = () => {
     if (!confirmImage) return;
@@ -444,6 +462,7 @@ export function TryOnCameraPage() {
                   onUse={tryWithSavedImage}
                   onRemove={removeSavedImage}
                   onClose={() => setShowCaptures(false)}
+                  onAddPerson={() => setShowAddPerson(true)}
                   showClose={true}
                 />
               </motion.div>
@@ -526,6 +545,18 @@ export function TryOnCameraPage() {
           `modelReady` becomes true (single-source-of-truth via the global
           `loadedModels` set + pub/sub in usePoseDetection). No separate
           popup needed. */}
+
+      {/* ─── Add Person Image modal ──────────────────────────────────────
+          Opens the AddCapturePanel (the SAME reusable component used in the
+          Captures Gallery) in CONTROLLED mode — the camera page controls
+          visibility via `showAddPerson`. The panel runs the same 3-stage
+          validation pipeline (person detection → compression → posture)
+          and only saves the image when all stages pass. */}
+      <AddCapturePanel
+        open={showAddPerson}
+        onModalOpen={() => stopCamera()}
+        onClose={() => setShowAddPerson(false)}
+      />
     </div>
   );
 }
@@ -537,12 +568,16 @@ function SavedCapturesPanel({
   onUse,
   onRemove,
   onClose,
+  onAddPerson,
   showClose = false,
 }: {
   savedImages: SavedCaptureImage[];
   onUse: (img: SavedCaptureImage) => void;
   onRemove: (id: string) => void;
   onClose?: () => void;
+  /** Opens the AddCapturePanel modal so the user can add a person image
+   *  from disk or URL directly from the camera page sidebar. */
+  onAddPerson?: () => void;
   showClose?: boolean;
 }) {
   // Select mode — same pattern as CapturesGalleryPage (consistent UI)
@@ -588,9 +623,26 @@ function SavedCapturesPanel({
               </>
             ) : (
               <>
-                <Button variant="ghost" size="sm" onClick={() => setSelectMode(true)} className="h-9 px-2 text-xs gap-1" disabled={savedImages.length === 0}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectMode(true)}
+                  className="h-9 px-2 text-xs gap-1"
+                  disabled={savedImages.length === 0}
+                >
                   <CheckSquare className="h-3.5 w-3.5" /><span className="hidden sm:inline">Select</span>
                 </Button>
+                {onAddPerson && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={onAddPerson}
+                    className="h-9 px-2 text-xs gap-1 text-primary hover:text-primary"
+                    aria-label="Add person image"
+                  >
+                    <UserPlus className="h-3.5 w-3.5" /><span className="hidden sm:inline">Add Person</span>
+                  </Button>
+                )}
               </>
             )}
             {showClose && (
@@ -606,7 +658,28 @@ function SavedCapturesPanel({
       </div>
       <div className="flex-1 overflow-y-auto scrollbar-boutique p-3 sm:p-4 space-y-3">
         {savedImages.length === 0 ? (
-          <p className="text-center py-12 text-xs text-muted-foreground">No saved captures yet.</p>
+          /* Empty state — show a prominent Add Person CTA so the user
+             knows how to get started without capturing from the camera. */
+          <div className="flex flex-col items-center justify-center py-12 px-4 text-center gap-3">
+            <div className="h-14 w-14 rounded-full bg-accent/15 text-accent grid place-items-center">
+              <UserPlus className="h-6 w-6" />
+            </div>
+            <div>
+              <p className="text-sm font-medium">No saved person images yet</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Add a person photo from your device or a URL to try on garments without using the camera.
+              </p>
+            </div>
+            {onAddPerson && (
+              <Button
+                onClick={onAddPerson}
+                size="sm"
+                className="mt-1 gap-1.5"
+              >
+                <Plus className="h-4 w-4" /> Add person image
+              </Button>
+            )}
+          </div>
         ) : (
           savedImages.map((img) => (
             <SavedCaptureCard

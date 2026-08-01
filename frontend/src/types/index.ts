@@ -151,6 +151,24 @@ export interface PoseThresholds {
   minBodyVisibility: number;
 }
 
+/**
+ * PersonDetectionParams — tuning parameters for the PERSON DETECTION model
+ * (Stage 1 only). Kept SEPARATE from PoseThresholds (which drive Stage 3
+ * posture checks) so each model section in Settings owns its own knobs.
+ *
+ * `confidenceThreshold` rejects detections below this score (0..1).
+ * `nmsIouThreshold` controls how aggressively overlapping boxes are merged.
+ * `maxPersons` caps the number of detections returned (perf guard).
+ */
+export interface PersonDetectionParams {
+  /** Minimum person confidence (0..1). Detections below this are discarded. */
+  confidenceThreshold: number;
+  /** IoU threshold for Non-Maximum Suppression (0..1). Higher = fewer merges. */
+  nmsIouThreshold: number;
+  /** Max number of person detections to return (perf guard). */
+  maxPersons: number;
+}
+
 export interface ImageCompressionSettings {
   maxFileSizeKb: number;
   minQuality: number;
@@ -174,8 +192,30 @@ export interface ThemeSettings {
 }
 
 export interface TryOnSettings {
-  activeModelId: DetectionModelId;
+  /**
+   * Model used for STAGE 1 — person detection (how many people are in the
+   * frame). Selectable independently from the posture model.
+   */
+  personDetectionModelId: DetectionModelId;
+  /**
+   * Model used for STAGE 3 — posture estimation (shoulder tilt, face yaw,
+   * body visibility). Selectable independently from the person-detection
+   * model.
+   *
+   * NOTE: Both models are YOLOv8-pose variants that return BOTH bounding
+   * boxes AND keypoints. Downloading a model makes it available for BOTH
+   * stages — the download is shared. The selection just controls which
+   * variant is used for each stage.
+   */
+  postureModelId: DetectionModelId;
+  /**
+   * @deprecated Use `personDetectionModelId` instead. Kept for backward
+   * compatibility with persisted older settings; migrated on load.
+   */
+  activeModelId?: DetectionModelId;
   poseThresholds: PoseThresholds;
+  /** Tuning parameters for the person-detection model (Stage 1). */
+  personDetectionParams: PersonDetectionParams;
   compression: ImageCompressionSettings;
   captureTimerSeconds: number;
   taglineRefreshMs: number;
@@ -221,11 +261,20 @@ export interface ActivityLogEntry {
     | "compression"
     | "network"
     | "settings"
-    | "camera";
+    | "camera"
+    | "interaction";
   label: string;
   durationMs?: number;
   detail?: string;
   level: "info" | "warn" | "error";
+  /**
+   * Optional actionable tip shown alongside error/warn entries — explains
+   * HOW to fix the issue. Surfaced in the ActivityLogPanel as a highlighted
+   * "Fix" callout so the user isn't left guessing.
+   */
+  tip?: string;
+  /** Name of the component that emitted the log (for interaction logs). */
+  component?: string;
 }
 
 /** Client-side filter state — applied to the products list. */

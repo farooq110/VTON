@@ -3,6 +3,7 @@ import { usePoseDetection, type PoseKeypoint } from "@/hooks/usePoseDetection";
 import { useImageCompression, type CompressionResult } from "@/hooks/useImageCompression";
 import { useAuthStore } from "@/lib/store";
 import { dataUrlSizeKb } from "@/lib/utils";
+import { isModelDownloaded } from "@/lib/model-persistence";
 import type { ImageCompressionSettings, PoseThresholds } from "@/types";
 
 /**
@@ -103,7 +104,12 @@ export function useImageValidation() {
       const skipPoseCheck = opts?.skipPoseCheck ?? false;
       const thresholds: PoseThresholds = settings.poseThresholds;
       const compressionSettings: ImageCompressionSettings = settings.compression;
-      const activeModelId = settings.activeModelId;
+      // SEPARATE MODELS: Stage 1 uses personDetectionModelId, Stage 3 uses
+      // postureModelId. Both can be the same or different — the download
+      // is shared. Stage 1 also gets its own params (confidence, NMS, max).
+      const personModelId = settings.personDetectionModelId;
+      const postureModelId = settings.postureModelId;
+      const personParams = settings.personDetectionParams;
 
       const log = (
         category: Parameters<typeof logActivity>[0]["category"],
@@ -111,27 +117,65 @@ export function useImageValidation() {
         detail?: string,
         level: "info" | "warn" | "error" = "info",
         durationMs?: number,
+        tip?: string,
       ) => {
-        logActivity({ category, label, detail, level, durationMs });
+        logActivity({ category, label, detail, level, durationMs, tip });
       };
 
       const startTime = Date.now();
       log("capture", "Validation pipeline started", `Image size: ${dataUrlSizeKb(imageDataUrl).toFixed(0)} KB`);
 
-      // ─── STAGE 1: Person detection ──────────────────────────────────────
+      // ─── MODEL STATUS PRE-CHECK ────────────────────────────────────────
+      // Before running any stages, verify BOTH required models are downloaded.
+      // If not, return a failure immediately with a clear "download the model"
+      // message — don't waste time on compression if detection can't run.
+      const personModelReady = isModelDownloaded(personModelId);
+      const postureModelReady = isModelDownloaded(postureModelId);
+      if (!personModelReady || !postureModelReady) {
+        const missingModels: string[] = [];
+        if (!personModelReady) missingModels.push(`Person detection (${personModelId})`);
+        if (!postureModelReady) missingModels.push(`Posture estimation (${postureModelId})`);
+        const reason = `Please download the model first: ${missingModels.join(", ")}. Go to Settings → Model downloads.`;
+        log("model", "Validation blocked — model not downloaded", reason, "error", 0, "Go to Settings → Model downloads → click Download next to the required model. The default model (YOLOv8n Pose) is recommended.");
+        callbacks?.onStageFail?.("stage1-person-detection", reason);
+        const result: ValidationResult = {
+          passed: false,
+          validatedDataUrl: imageDataUrl,
+          sizeKb: dataUrlSizeKb(imageDataUrl),
+          compressionCycles: 0,
+          personScore: 0,
+          keypointCount: 0,
+          strategy: "metadata-only",
+          failureReason: reason,
+          failedStage: "stage1-person-detection",
+        };
+        lastResultRef.current = result;
+        callbacks?.onComplete?.(result);
+        return result;
+      }
+
+      // ─── STAGE 1: Person detection (uses personDetectionModelId) ────────
       let stage1Keypoints: PoseKeypoint[] | null = null;
       let personScore = 0;
       {
         const stageStart = Date.now();
-        callbacks?.onStageStart?.("stage1-person-detection", "Detecting person", `Loading ${activeModelId}…`);
-        log("model", "Stage 1: loading detection model", `${activeModelId} (score threshold: ${thresholds.personScore})`);
+        callbacks?.onStageStart?.("stage1-person-detection", "Detecting person", `Loading ${personModelId}…`);
+        log("model", "Stage 1: person detection", `${personModelId} (conf: ${personParams.confidenceThreshold}, NMS: ${personParams.nmsIouThreshold})`);
 
         try {
-          const detection = await detect(imageDataUrl, activeModelId, thresholds.personScore);
+          const detection = await detect(
+            imageDataUrl,
+            personModelId,
+            personParams.confidenceThreshold,
+            {
+              nmsIouThreshold: personParams.nmsIouThreshold,
+              maxPersons: personParams.maxPersons,
+            },
+          );
 
           if (detection.kind === "no-person" || (detection.kind === "ok" && detection.score < thresholds.personScore)) {
             const reason = "No person detected in the frame. Please stand in the center of the camera.";
-            log("capture", "Stage 1 FAILED: no person", reason, "error", Date.now() - stageStart);
+            log("capture", "Stage 1 FAILED: no person", reason, "error", Date.now() - stageStart, "Stand in the centre of the frame with your full body visible. Ensure the lighting is bright enough for the model to find you.");
             callbacks?.onStageFail?.("stage1-person-detection", reason);
             const result: ValidationResult = {
               passed: false,
@@ -226,17 +270,26 @@ export function useImageValidation() {
         }
       }
 
-      // ─── STAGE 3: Pose check (skippable) ────────────────────────────────
+      // ─── STAGE 3: Pose check (uses postureModelId) ───────────────────
       if (!skipPoseCheck) {
         const stageStart = Date.now();
-        callbacks?.onStageStart?.("stage3-pose-check", "Checking posture", "Shoulders · face · body");
-        log("capture", "Stage 3: pose check started", `Using ${stage1Keypoints ? "cached keypoints" : "fresh detection"}`);
+        callbacks?.onStageStart?.("stage3-pose-check", "Checking posture", `Using ${postureModelId}`);
+        log("capture", "Stage 3: pose check started", `Model: ${postureModelId} · ${stage1Keypoints ? "cached keypoints" : "fresh detection"}`);
 
         try {
           let keypoints = stage1Keypoints;
-          // Only re-run detect if Stage 1 didn't yield keypoints (rare edge case).
+          // Only re-run detect if Stage 1 didn't yield keypoints (rare).
+          // Uses the POSTURE model (not the person-detection model).
           if (!keypoints) {
-            const detection = await detect(compressed.dataUrl, activeModelId, thresholds.personScore);
+            const detection = await detect(
+              compressed.dataUrl,
+              postureModelId,
+              personParams.confidenceThreshold,
+              {
+                nmsIouThreshold: personParams.nmsIouThreshold,
+                maxPersons: personParams.maxPersons,
+              },
+            );
             if (detection.kind === "ok") keypoints = detection.keypoints;
           }
 
@@ -293,7 +346,7 @@ export function useImageValidation() {
       callbacks?.onComplete?.(result);
       return result;
     },
-    [checkPose, compress, detect, logActivity, settings.activeModelId, settings.compression, settings.poseThresholds],
+    [checkPose, compress, detect, logActivity, settings.personDetectionModelId, settings.postureModelId, settings.personDetectionParams, settings.compression, settings.poseThresholds],
   );
 
   return {

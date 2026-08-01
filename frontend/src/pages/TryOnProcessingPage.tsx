@@ -5,6 +5,7 @@ import { useAuthStore } from "@/lib/store";
 import { useTryOnOrchestrator } from "@/hooks/useTryOnOrchestrator";
 import { useTaglineRotation } from "@/hooks/useTaglineRotation";
 import { useProducts } from "@/hooks/useProducts";
+import { useToast } from "@/components/ui/toast";
 
 interface LocalStage {
   id: string;
@@ -19,11 +20,47 @@ export function TryOnProcessingPage() {
   const navigate = useNavigate();
   const { data: products } = useProducts();
   const { settings, savedImages, activeCaptureId, selectedProductId } = useAuthStore();
+  const { toast } = useToast();
   // Defensive: ensure products is always an array before .find
   const safeProducts = Array.isArray(products) ? products : [];
   const product = safeProducts.find((p) => p.id === selectedProductId);
   const capture = savedImages.find((i) => i.id === activeCaptureId);
   const skipStages = sessionStorage.getItem("nova_skip_stages") === "true";
+
+  // ─── PENDING CAPTURE (from camera) ────────────────────────────────────
+  // When the user captures from the camera, the image is NOT yet in the
+  // store — it's stored as a "pending capture" in sessionStorage. The
+  // orchestrator saves it to the store AFTER validation passes. So we need
+  // to read it from sessionStorage here to display it + run validation.
+  const [pendingCapture, setPendingCapture] = useState<{
+    dataUrl: string;
+    sizeKb: number;
+    capturedAt: number;
+  } | null>(null);
+
+  useEffect(() => {
+    const raw = sessionStorage.getItem("nova_pending_capture");
+    if (raw) {
+      try {
+        setPendingCapture(JSON.parse(raw));
+      } catch {
+        // Best-effort — ignore parse errors.
+      }
+    }
+  }, []);
+
+  // The effective capture: either the store-backed one (saved image) or the
+  // pending one (just captured from camera, not yet saved).
+  const effectiveCapture = capture ?? (pendingCapture
+    ? {
+        id: "pending",
+        dataUrl: pendingCapture.dataUrl,
+        thumbnailUrl: pendingCapture.dataUrl,
+        capturedAt: pendingCapture.capturedAt,
+        passedAllStages: false,
+        sizeKb: pendingCapture.sizeKb,
+      }
+    : undefined);
 
   const [stages, setStages] = useState<LocalStage[]>(() =>
     (skipStages ? ["calling-ai", "tracking-brand"] : STAGE_ORDER).map((id) => ({ id, label: id, status: "pending" as const })),
@@ -49,6 +86,13 @@ export function TryOnProcessingPage() {
     onError: (msg) => {
       setError(msg);
       setStages((prev) => prev.map((s) => (s.status === "active" ? { ...s, status: "failed" } : s)));
+      // Show a toast for all validation errors (including timeouts) so the
+      // user gets immediate feedback.
+      toast({
+        title: "Validation error",
+        description: msg,
+        variant: "destructive",
+      });
     },
     onResult: () => {
       setStages((prev) => prev.map((s) => ({ ...s, status: "passed" })));
@@ -61,15 +105,15 @@ export function TryOnProcessingPage() {
   });
 
   useEffect(() => {
-    if (startedRef.current || !capture || !product) return;
+    if (startedRef.current || !effectiveCapture || !product) return;
     startedRef.current = true;
     // Wrap in try/catch so any unhandled error in the orchestrator surfaces
     // a friendly error instead of leaving the page stuck on "Generating…".
-    orchestrator.run(capture.dataUrl, product, { skipStages }).catch((e) => {
+    orchestrator.run(effectiveCapture.dataUrl, product, { skipStages }).catch((e) => {
       const msg = e instanceof Error ? e.message : "Something went wrong during try-on.";
       setError(msg);
     });
-  }, [capture, product]);
+  }, [effectiveCapture, product]);
 
   useEffect(() => {
     if (error) return;
@@ -77,37 +121,16 @@ export function TryOnProcessingPage() {
     return () => clearInterval(id);
   }, [error]);
 
-  if (!capture || !product) {
+  if (!effectiveCapture || !product) {
     return <div className="min-h-screen grid place-items-center bg-background"><button onClick={() => navigate("/tryon/camera")} className="text-primary underline">Open camera</button></div>;
   }
 
-  if (error) {
-    return (
-      <div className="min-h-screen grid place-items-center bg-background p-6">
-        <div className="text-center max-w-md">
-          <h2 className="font-display text-2xl">Let&apos;s retake that</h2>
-          <p className="text-sm text-muted-foreground mt-3">{error}</p>
-          <div className="flex gap-2 justify-center mt-6">
-            <button onClick={() => navigate("/tryon/camera")} className="px-6 h-12 rounded-xl bg-primary text-primary-foreground">
-              Retake photo
-            </button>
-            <button
-              onClick={() => {
-                sessionStorage.setItem("nova_skip_stages", "true");
-                setError(null);
-                setStages(["calling-ai", "tracking-brand"].map((id) => ({ id, label: id, status: "pending" as const })));
-                startedRef.current = false;
-                setTimeout(() => orchestrator.run(capture.dataUrl, product, { skipStages: true }), 100);
-              }}
-              className="px-6 h-12 rounded-xl border border-border text-sm"
-            >
-              Skip &amp; try anyway
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // NOTE: When a validation error occurs, we do NOT replace the whole UI
+  // with a separate error screen. Instead, we keep the processing UI
+  // (image + stages + progress) visible and show the error INLINE as a
+  // banner at the top of the stages panel, with "Retake photo" and
+  // "Skip & try anyway" buttons. This matches the user's expectation:
+  // "keep the UI unchanged, just show the error inside the same interface."
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -118,7 +141,7 @@ export function TryOnProcessingPage() {
 
       <main className="flex-1 grid grid-cols-1 lg:grid-cols-2">
         <section className="relative bg-foreground overflow-hidden min-h-[50vh] grid place-items-center">
-          <img src={capture.dataUrl} alt="" className="absolute inset-0 h-full w-full object-cover blur-2xl scale-110 opacity-60" />
+          <img src={effectiveCapture.dataUrl} alt="" className="absolute inset-0 h-full w-full object-cover blur-2xl scale-110 opacity-60" />
           <div className="absolute inset-0 bg-gradient-to-br from-primary/40 via-foreground/60 to-foreground" />
           <div className="relative z-10 text-center text-primary-foreground p-6 max-w-md">
             <div className="relative h-32 w-32 mx-auto">
@@ -135,8 +158,47 @@ export function TryOnProcessingPage() {
           <h2 className="font-display text-2xl sm:text-3xl">Your fitting is in progress</h2>
           <p className="text-sm text-muted-foreground mt-2">Running {stages.length} stages before sending your photo to the AI.</p>
 
+          {/* ─── INLINE ERROR BANNER ────────────────────────────────────────
+              When a validation error occurs, we keep the processing UI
+              (image + stages + progress) visible and show the error INLINE
+              as a banner here, with "Retake photo" and "Skip & try anyway"
+              buttons. The UI is NOT replaced by a separate error screen. */}
+          {error && (
+            <div className="mt-4 rounded-xl border border-destructive/40 bg-destructive/10 p-4 space-y-3">
+              <div className="flex items-start gap-3">
+                <div className="h-8 w-8 rounded-full bg-destructive/20 text-destructive grid place-items-center shrink-0">
+                  <span className="text-lg leading-none">!</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-destructive">Validation error</p>
+                  <p className="text-xs text-muted-foreground mt-1 leading-relaxed break-words">{error}</p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => navigate("/tryon/camera")}
+                  className="px-4 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition"
+                >
+                  Retake photo
+                </button>
+                <button
+                  onClick={() => {
+                    sessionStorage.setItem("nova_skip_stages", "true");
+                    setError(null);
+                    setStages(["calling-ai", "tracking-brand"].map((id) => ({ id, label: id, status: "pending" as const })));
+                    startedRef.current = false;
+                    setTimeout(() => orchestrator.run(effectiveCapture.dataUrl, product, { skipStages: true }), 100);
+                  }}
+                  className="px-4 h-10 rounded-lg border border-border text-sm font-medium hover:bg-muted transition"
+                >
+                  Skip &amp; try anyway
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Model loading indicator — shown when the YOLOv8n model is downloading */}
-          {modelStatus === "loading" && (
+          {modelStatus === "loading" && !error && (
             <div className="mt-4 rounded-xl border border-accent/30 bg-accent/5 p-4 flex items-center gap-3">
               <Loader2 className="h-5 w-5 animate-spin text-accent shrink-0" />
               <div className="flex-1 min-w-0">
