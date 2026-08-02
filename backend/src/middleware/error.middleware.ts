@@ -211,7 +211,19 @@ function classify(err: ErrorLike): { status: number; code: string; message: stri
     };
   }
 
-  // ─── 10. Fallback — truly unexpected ───────────────────────────────
+  // Prisma known errors → friendly messages
+  if (err.code === 'P2025') {
+    return { status: 404, code: 'NOT_FOUND', message: 'Resource not found' };
+  }
+  if (err.code === 'P2002') {
+    return {
+      status: 409,
+      code: 'CONFLICT',
+      message: 'A record with this value already exists',
+    };
+  }
+
+  // Fallback
   return {
     status: 500,
     code: 'INTERNAL',

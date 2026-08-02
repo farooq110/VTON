@@ -3,9 +3,15 @@
  * No framework imports here — kept pure so SSR can also pull these in.
  */
 
+// Use a RELATIVE path ("/api") by default so the browser makes same-origin
+// requests. In dev, Vite proxies /api → http://localhost:4000. In prod, Nginx
+// proxies /api → the backend. This avoids CORS issues and works in preview
+// environments where the browser can't reach the backend's localhost.
+//
+// Set VITE_API_URL to an absolute URL ONLY if the frontend and backend are on
+// different origins in production (e.g. Vercel frontend + Railway backend).
 export const API_URL =
-  (import.meta?.env?.VITE_API_URL as string | undefined) ||
-  "http://localhost:4000/api";
+  (import.meta?.env?.VITE_API_URL as string | undefined) || "/api";
 
 export const APP_NAME =
   (import.meta?.env?.VITE_APP_NAME as string | undefined) || "Admin Portal";

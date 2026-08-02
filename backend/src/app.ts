@@ -1,4 +1,6 @@
 import express, { type Express } from 'express';
+import path from 'node:path';
+import fs from 'node:fs';
 import helmet from 'helmet';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -31,11 +33,13 @@ export function createApp(): Express {
   app.set('trust proxy', 1);
 
   // --- Security & parsing middleware (order matters) ---
-  app.use(helmet());
+  app.use(helmet({
+    contentSecurityPolicy: false, // disable CSP for SPA compatibility
+  }));
   app.use(
     cors({
       origin: config.cors.origin.split(',').map((s) => s.trim()),
-      credentials: true, // required for cookie-based auth cross-origin
+      credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
     }),
@@ -75,6 +79,21 @@ export function createApp(): Express {
   app.use('/api/telemetry', telemetryRoutes);
   app.use('/api/notifications', notificationRoutes);
   app.use('/api/activity', activityRoutes);
+
+  // --- Serve frontend static files in production ---
+  // The built Vite app lives in ../admin-portal/dist/ (relative to backend/)
+  const frontendDist = path.resolve(__dirname, '..', '..', 'admin-portal', 'dist');
+  if (fs.existsSync(frontendDist)) {
+    app.use(express.static(frontendDist));
+    // SPA fallback: any non-API GET route serves index.html (for hash routing)
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path === '/health') return next();
+      res.sendFile(path.join(frontendDist, 'index.html'));
+    });
+    logger.info({ frontendDist }, 'Serving frontend static files');
+  } else {
+    logger.warn({ frontendDist }, 'Frontend dist not found — API-only mode');
+  }
 
   // --- 404 + centralized error handler (LAST) ---
   app.use(notFoundHandler);

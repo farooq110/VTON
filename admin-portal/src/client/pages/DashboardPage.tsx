@@ -2,19 +2,32 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   Activity,
+  AlertTriangle,
   ArrowRight,
+  BarChart3,
   CreditCard,
   Shirt,
+  Store,
+  TrendingUp,
   Users,
 } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/client/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/client/components/ui/card";
 import { Button } from "@/client/components/ui/button";
-import { KpiCard } from "@/client/components/shared/KpiCard";
-import { LoadingState, ErrorState } from "@/client/components/shared/EmptyState";
-import { apiGet } from "@/client/lib/api-client";
+import { Badge } from "@/client/components/ui/badge";
+import {
+  LoadingState,
+  ErrorState,
+} from "@/client/components/shared/EmptyState";
+import { apiGet, apiGetPaginated } from "@/client/lib/api-client";
 import { ROUTES } from "@/shared/constants";
-import type { ActivitySummary } from "@/shared/types";
-import { timeAgo, formatDateTime } from "@/client/lib/utils";
+import type { ActivitySummary, Customer } from "@/shared/types";
+import { formatDate } from "@/client/lib/utils";
 
 export default function DashboardPage() {
   const summary = useQuery<ActivitySummary>({
@@ -23,117 +36,200 @@ export default function DashboardPage() {
     staleTime: 30 * 1000,
   });
 
+  const recentCustomers = useQuery({
+    queryKey: ["customers", "recent"],
+    queryFn: () =>
+      apiGetPaginated<Customer>("/customers?page=1&pageSize=5"),
+    staleTime: 60 * 1000,
+  });
+
+  const isLoading = summary.isLoading;
+  const isError = summary.isError;
+
+  // Derive API events + errors from activity summary
+  const apiEvents24h =
+    (summary.data?.last24h.vtonRequests ?? 0) +
+    (summary.data?.last24h.usageRecords ?? 0);
+  const errors24h = summary.data?.last24h.failedVtonRequests ?? 0;
+  const warnings24h = summary.data?.totals.pendingVtonRequests ?? 0;
+  const errorRate =
+    apiEvents24h > 0 ? (errors24h / apiEvents24h) * 100 : 0;
+
+  const stats = [
+    {
+      label: "Customers",
+      value: summary.data?.totals.customers ?? 0,
+      icon: Users,
+      to: ROUTES.CUSTOMERS,
+      accent: "text-primary",
+    },
+    {
+      label: "Franchises",
+      value: summary.data?.totals.franchises ?? 0,
+      icon: Store,
+      to: ROUTES.FRANCHISES,
+      accent: "text-emerald-600",
+    },
+    {
+      label: "API events (24h)",
+      value: apiEvents24h,
+      icon: BarChart3,
+      to: ROUTES.ACTIVITY,
+      accent: "text-primary",
+    },
+    {
+      label: "Errors (24h)",
+      value: errors24h,
+      icon: AlertTriangle,
+      to: ROUTES.ACTIVITY,
+      accent: errors24h > 0 ? "text-destructive" : "text-emerald-600",
+    },
+  ];
+
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {summary.isLoading ? (
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        {isLoading ? (
           <LoadingState label="Loading KPIs…" />
-        ) : summary.isError ? (
+        ) : isError ? (
           <ErrorState
             message="Could not load dashboard KPIs."
             onRetry={() => summary.refetch()}
           />
         ) : (
-          <>
-            <KpiCard
-              label="Customers"
-              value={summary.data?.totals.customers ?? 0}
-              hint={`${summary.data?.totals.activeCustomers ?? 0} active`}
-              icon={Users}
-              accent="info"
-            />
-            <KpiCard
-              label="Franchises"
-              value={summary.data?.totals.franchises ?? 0}
-              icon={Activity}
-              accent="success"
-            />
-            <KpiCard
-              label="API Keys"
-              value={summary.data?.totals.apiKeys ?? 0}
-              hint={`${summary.data?.totals.activeApiKeys ?? 0} active`}
-              icon={CreditCard}
-              accent="warning"
-            />
-            <KpiCard
-              label="Credits used"
-              value={(summary.data?.totals.totalCreditsUsed ?? 0).toLocaleString()}
-              hint="All time"
-              icon={Shirt}
-              accent="default"
-            />
-          </>
+          stats.map((s) => (
+            <Link key={s.label} to={s.to}>
+              <Card className="hover:shadow-md transition-shadow h-full">
+                <CardContent className="flex items-center gap-3 p-3 sm:p-4">
+                  <div className="h-9 w-9 sm:h-10 sm:w-10 shrink-0 rounded-md bg-accent text-accent-foreground grid place-items-center">
+                    <s.icon className="h-4 w-4 sm:h-5 sm:w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs text-muted-foreground truncate">
+                      {s.label}
+                    </div>
+                    <div
+                      className={`text-lg sm:text-xl font-semibold ${s.accent}`}
+                    >
+                      {s.value}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+          ))
         )}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0">
-            <CardTitle>Recent activity (24h)</CardTitle>
-            <Button asChild variant="ghost" size="sm">
-              <Link to={ROUTES.ACTIVITY}>
+      {/* Recent Customers + Production Activity */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        {/* Recent Customers */}
+        <Card>
+          <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <CardTitle>Recent customers</CardTitle>
+              <CardDescription>Latest additions</CardDescription>
+            </div>
+            <Button asChild variant="ghost" size="sm" className="self-start sm:self-auto">
+              <Link to={ROUTES.CUSTOMERS}>
                 View all <ArrowRight className="h-4 w-4" />
               </Link>
             </Button>
           </CardHeader>
-          <CardContent>
-            {summary.isLoading ? (
-              <LoadingState />
-            ) : summary.isError ? (
+          <CardContent className="space-y-2">
+            {recentCustomers.isLoading ? (
+              <LoadingState label="Loading customers…" />
+            ) : recentCustomers.isError ? (
               <ErrorState
-                message="Could not load recent activity."
-                onRetry={() => summary.refetch()}
+                message="Could not load customers."
+                onRetry={() => recentCustomers.refetch()}
               />
             ) : (
-              <div className="grid gap-3 sm:grid-cols-3">
-                <StatRow
-                  label="VTON requests"
-                  value={summary.data?.last24h.vtonRequests ?? 0}
-                />
-                <StatRow
-                  label="Completed"
-                  value={summary.data?.last24h.completedVtonRequests ?? 0}
-                />
-                <StatRow
-                  label="Failed"
-                  value={summary.data?.last24h.failedVtonRequests ?? 0}
-                />
-              </div>
-            )}
-
-            <div className="mt-6">
-              <div className="mb-2 text-sm font-medium text-muted-foreground">
-                Usage by day (last 7)
-              </div>
-              <div className="flex flex-col gap-1">
-                {(summary.data?.byDay ?? []).slice(-7).map((d) => (
-                  <div
-                    key={d.day}
-                    className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
+              recentCustomers.data?.items.map((c) => (
+                <div
+                  key={c.id}
+                  className="flex items-center justify-between py-2 border-b last:border-0 gap-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium truncate">
+                      {c.businessName}
+                    </div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {c.email}
+                    </div>
+                  </div>
+                  <Badge
+                    variant={c.status === "ACTIVE" ? "default" : "secondary"}
+                    className="shrink-0"
                   >
-                    <span className="text-muted-foreground">
-                      {formatDateTime(d.day)}
-                    </span>
-                    <span className="font-medium">
-                      {d.count} · {d.credits} cr
-                    </span>
-                  </div>
-                ))}
-                {(summary.data?.byDay ?? []).length === 0 && (
-                  <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
-                    No usage recorded yet.
-                  </div>
-                )}
-              </div>
-            </div>
+                    {c.status}
+                  </Badge>
+                </div>
+              )) ?? (
+                <div className="text-sm text-muted-foreground">
+                  No customers yet.
+                </div>
+              )
+            )}
           </CardContent>
         </Card>
 
+        {/* Production Activity 24h */}
         <Card>
-          <CardHeader>
-            <CardTitle>Quick links</CardTitle>
+          <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <CardTitle>Production activity (24h)</CardTitle>
+              <CardDescription>Error rate &amp; traffic</CardDescription>
+            </div>
+            <Button asChild variant="ghost" size="sm" className="self-start sm:self-auto">
+              <Link to={ROUTES.ACTIVITY}>
+                Details <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 sm:gap-3 text-center">
+              <div className="p-2 sm:p-3 rounded-md bg-muted">
+                <div className="text-xs text-muted-foreground">Total</div>
+                <div className="text-base sm:text-lg font-semibold">
+                  {apiEvents24h}
+                </div>
+              </div>
+              <div className="p-2 sm:p-3 rounded-md bg-muted">
+                <div className="text-xs text-muted-foreground">Warnings</div>
+                <div className="text-base sm:text-lg font-semibold text-amber-600">
+                  {warnings24h}
+                </div>
+              </div>
+              <div className="p-2 sm:p-3 rounded-md bg-muted">
+                <div className="text-xs text-muted-foreground">Errors</div>
+                <div className="text-base sm:text-lg font-semibold text-destructive">
+                  {errors24h}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground pt-2">
+              <TrendingUp className="h-3.5 w-3.5" />
+              Error rate:{" "}
+              <span className="font-medium text-foreground">
+                {errorRate.toFixed(2)}%
+              </span>
+            </div>
+            <div className="text-[10px] text-muted-foreground pt-2">
+              Last updated: {formatDate(new Date().toISOString())}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Quick Links */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Quick links</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <QuickLink
               to={ROUTES.CUSTOMERS}
               icon={Users}
@@ -152,18 +248,9 @@ export default function DashboardPage() {
               title="Usage"
               desc="Track credit consumption"
             />
-          </CardContent>
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-function StatRow({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-md border p-3">
-      <div className="text-2xl font-bold">{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -184,14 +271,14 @@ function QuickLink({
       to={to}
       className="flex items-center gap-3 rounded-md border p-3 transition-colors hover:bg-accent"
     >
-      <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary/10 text-primary">
+      <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary/10 text-primary shrink-0">
         <Icon className="h-4 w-4" />
       </div>
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
         <div className="text-sm font-medium">{title}</div>
-        <div className="text-xs text-muted-foreground">{desc}</div>
+        <div className="text-xs text-muted-foreground truncate">{desc}</div>
       </div>
-      <ArrowRight className="h-4 w-4 text-muted-foreground" />
+      <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />
     </Link>
   );
 }

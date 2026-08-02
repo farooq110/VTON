@@ -295,27 +295,28 @@ function CustomerTable({
   onDelete: (c: Customer) => void;
 }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Business</TableHead>
-          <TableHead>Contact</TableHead>
-          <TableHead>Email</TableHead>
-          <TableHead>Phone</TableHead>
-          <TableHead className="text-center">Franchises</TableHead>
-          <TableHead className="text-center">API Keys</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Created</TableHead>
-          <TableHead className="w-10" />
-        </TableRow>
-      </TableHeader>
+    <div className="overflow-x-auto">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="whitespace-nowrap">Business</TableHead>
+            <TableHead className="whitespace-nowrap">Contact</TableHead>
+            <TableHead className="whitespace-nowrap">Email</TableHead>
+            <TableHead className="whitespace-nowrap">Phone</TableHead>
+            <TableHead className="text-center whitespace-nowrap">Franchises</TableHead>
+            <TableHead className="text-center whitespace-nowrap">API Keys</TableHead>
+            <TableHead className="whitespace-nowrap">Status</TableHead>
+            <TableHead className="whitespace-nowrap">Created</TableHead>
+            <TableHead className="w-10" />
+          </TableRow>
+        </TableHeader>
       <TableBody>
         {items.map((c) => (
           <TableRow key={c.id}>
             <TableCell className="font-medium">{c.businessName}</TableCell>
             <TableCell>{c.name}</TableCell>
             <TableCell className="text-muted-foreground">{c.email}</TableCell>
-            <TableCell className="text-muted-foreground">
+            <TableCell className="text-muted-foreground whitespace-nowrap">
               {c.phone ?? "—"}
             </TableCell>
             <TableCell className="text-center">
@@ -340,6 +341,7 @@ function CustomerTable({
         ))}
       </TableBody>
     </Table>
+    </div>
   );
 }
 
