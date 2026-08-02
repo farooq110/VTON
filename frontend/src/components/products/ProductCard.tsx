@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatPrice, resolveProductImage, onImageError } from "@/lib/utils";
 import { logger } from "@/lib/logger";
+import { ProductImage } from "@/components/products/ProductImage";
 import type { Product } from "@/types";
 
 /**
@@ -86,12 +87,15 @@ export function ProductCard({
         {/* Mobile: horizontal layout (image left, info right). Desktop: vertical. */}
         <div className="flex sm:flex-col">
           <div className="relative w-28 sm:w-auto aspect-[4/5] sm:aspect-[4/5] overflow-hidden bg-muted shrink-0 sm:shrink">
-            <img
+            {/* Issue 6 fix — graceful image loading with shimmer skeleton.
+                The ProductImage component shows a clean animated skeleton
+                placeholder until the image is fully loaded, then
+                cross-fades the real image in. No more uneven loading. */}
+            <ProductImage
               src={resolveProductImage(product)}
               alt={product.name}
               onError={(e) => onImageError(e, product.sku)}
               className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-              loading="lazy"
             />
             {/* Caller-provided badge (e.g. trending rank) */}
             {badge && (

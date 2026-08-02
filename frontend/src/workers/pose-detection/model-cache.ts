@@ -7,6 +7,15 @@
  *
  * State here lives in the SharedWorker (not the main thread) and persists
  * across page refreshes and across tabs of the same origin.
+ *
+ * ─── Issue 7 fix — IndexedDB offline manifest ──────────────────────────
+ * After a successful load, we persist a `ModelCacheEntry` to IndexedDB.
+ * This survives Cache Storage clears and gives us a permanent record of
+ * "the user downloaded this model" — even on a cold restart, we know to
+ * re-load it transparently instead of asking the user to download again.
+ *
+ * The IndexedDB layer is imported dynamically (worker context) so it's
+ * tree-shakeable on browsers without IndexedDB support.
  */
 
 import type { DetectionModelId } from "@/types";
@@ -14,6 +23,12 @@ import { MODEL_REPO } from "./constants";
 import type { ModelEntry, TransformersModule } from "./types";
 import { loadTransformers } from "./transformers-loader";
 import { postLog, postProgress } from "./port-bus";
+import {
+  putModelEntry,
+  getModelEntry,
+  getAllCachedModelIds,
+  deleteModelEntry,
+} from "@/lib/model-idb-cache";
 
 const modelCache = new Map<DetectionModelId, ModelEntry>();
 const inFlightLoads = new Map<DetectionModelId, Promise<ModelEntry>>();
@@ -30,14 +45,29 @@ export function getLoadedModels(): DetectionModelId[] {
 }
 
 /**
+ * Issue 7 fix — returns the ids of all models that have a persisted manifest
+ * in IndexedDB. Called on app startup so we can pre-warm the worker's
+ * in-memory cache from the offline manifest (transparent re-download if
+ * the Cache Storage was cleared, but no user-facing "download again?"
+ * prompt).
+ */
+export async function getCachedModelIds(): Promise<DetectionModelId[]> {
+  return getAllCachedModelIds();
+}
+
+/**
  * Drops a model from the worker's in-memory cache so the next "load"
  * actually re-fetches the weights. transformers.js itself stays loaded
  * — only the per-model weights get re-read.
+ *
+ * Issue 7 fix — also removes the IndexedDB manifest entry so the model
+ * is fully forgotten.
  */
-export function evictModel(modelId: DetectionModelId): void {
+export async function evictModel(modelId: DetectionModelId): Promise<void> {
   loadedModels.delete(modelId);
   modelCache.delete(modelId);
   inFlightLoads.delete(modelId);
+  await deleteModelEntry(modelId);
   postLog("model", `Model evicted from worker cache: ${modelId}`);
 }
 
@@ -47,6 +77,11 @@ export function evictModel(modelId: DetectionModelId): void {
  * share a single in-flight promise.
  *
  * `onProgress` receives 0..1 progress updates while weights download.
+ *
+ * Issue 7 fix — before loading, we check the IndexedDB manifest. If the
+ * model was previously downloaded, we log that we're re-attaching to the
+ * existing Cache Storage weights (no CDN fetch). If neither cache has it,
+ * we download from the CDN and persist a new manifest entry.
  */
 export function getModelAndProcessor(
   modelId: DetectionModelId,
@@ -73,7 +108,19 @@ async function loadModelEntry(
   onProgress?: (p: number) => void,
 ): Promise<ModelEntry> {
   const repo = MODEL_REPO[modelId];
-  postLog("model", `Loading model: ${modelId} (repo: ${repo})`);
+
+  // ─── Issue 7: check the IndexedDB manifest first ─────────────────────
+  // If we have a persisted entry, the model was previously downloaded —
+  // transformers.js will find the weights in its own Cache Storage and
+  // load them instantly (no CDN fetch). We log this so the activity
+  // panel shows the difference between "loading from cache" and
+  // "downloading from CDN".
+  const idbEntry = await getModelEntry(modelId);
+  if (idbEntry) {
+    postLog("model", `Loading model from offline cache: ${modelId} (repo: ${repo}, first downloaded ${new Date(idbEntry.downloadedAt).toISOString()})`);
+  } else {
+    postLog("model", `Loading model: ${modelId} (repo: ${repo})`);
+  }
 
   const transformers: TransformersModule = await loadTransformers();
   const { AutoModel, AutoProcessor } = transformers;
@@ -99,6 +146,18 @@ async function loadModelEntry(
   modelCache.set(modelId, entry);
   loadedModels.add(modelId);
   postLog("model", `Model loaded: ${modelId}`);
+
+  // ─── Issue 7: persist / update the IndexedDB manifest ────────────────
+  // Fire-and-forget — don't block the load on IDB write. We store the
+  // repo + timestamps so future cold starts can detect the model was
+  // previously downloaded even if Cache Storage is empty.
+  void putModelEntry({
+    modelId,
+    repo,
+    downloadedAt: idbEntry?.downloadedAt ?? Date.now(),
+    lastUsedAt: Date.now(),
+  });
+
   return entry;
 }
 

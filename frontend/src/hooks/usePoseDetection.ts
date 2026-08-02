@@ -115,6 +115,16 @@ function notifyModelCacheChange(modelId: DetectionModelId, isDownloaded: boolean
 }
 
 /**
+ * Issue 5 fix — exposes the SharedWorker singleton so other hooks (e.g.
+ * `useOffscreenCanvas`) can post messages to it without going through
+ * `usePoseDetection`. Returns `null` if the worker hasn't been created
+ * yet (the caller can call `getWorker()` directly to force creation).
+ */
+export function getPoseWorker(): SharedWorker | null {
+  return workerSingleton;
+}
+
+/**
  * Lazily creates the pose-detection SharedWorker. Reused across all hook
  * instances AND across page refreshes (SharedWorker persists).
  *
@@ -511,8 +521,109 @@ export function usePoseDetection() {
     [],
   );
 
+  /**
+   * Issue 2 fix — zero-copy transferable-frame detection.
+   *
+   * Accepts an `ImageData` (or anything shaped like one) and transfers
+   * its underlying `ArrayBuffer` to the worker via the postMessage
+   * transfer list. This avoids serialising a base64 data URL on every
+   * frame, which was the main source of GC pauses at 30+ FPS.
+   *
+   * Use this instead of `detect()` when you have a live canvas frame
+   * (e.g. from `ctx.getImageData(0, 0, w, h)` in a requestAnimationFrame
+   * loop). For static uploads / data URLs, keep using `detect()`.
+   *
+   * NOTE: the caller's `ImageData.data.buffer` is TRANSFERRED — the
+   * caller must NOT touch it after calling this. A fresh `ImageData`
+   * should be created for the next frame (which `getImageData` does
+   * automatically).
+   */
+  const detectFrame = useCallback(
+    async (
+      imageData: { data: Uint8ClampedArray; width: number; height: number },
+      modelId: DetectionModelId,
+      minScore = 0.6,
+      opts?: DetectOptions,
+    ): Promise<PersonDetectionResult> => {
+      setActiveModelId(modelId);
+
+      if (!isModelDownloaded(modelId)) {
+        const errMsg = "Please download the model first from Settings before capturing or uploading an image.";
+        logger.model(`Detection blocked — model not downloaded: ${modelId}`, {
+          detail: errMsg,
+          level: "error",
+          tip: "Go to Settings → Model downloads → click Download next to a model.",
+        });
+        throw new Error(errMsg);
+      }
+
+      try {
+        const worker = getWorker();
+        setModelStatus("ready");
+        setModelProgress(1);
+
+        // Detach the buffer from the caller's ImageData and transfer
+        // ownership to the worker. After this line, `imageData.data`
+        // becomes a zero-length view — the caller must allocate a fresh
+        // ImageData for the next frame.
+        const buffer = imageData.data.buffer;
+
+        const reqId = nextReqId++;
+        const result = await new Promise<PersonDetectionResult>((resolve, reject) => {
+          pendingDetects.set(reqId, { resolve, reject });
+          worker.port.postMessage(
+            {
+              type: "detect-frame",
+              modelId,
+              buffer,
+              width: imageData.width,
+              height: imageData.height,
+              minScore,
+              reqId,
+              nmsIouThreshold: opts?.nmsIouThreshold ?? 0.5,
+              maxPersons: opts?.maxPersons ?? 10,
+            },
+            [buffer], // ← zero-copy transfer list
+          );
+
+          setTimeout(() => {
+            if (pendingDetects.has(reqId)) {
+              pendingDetects.delete(reqId);
+              reject(new Error("Validation timed out (30s). The model may still be loading."));
+            }
+          }, 30_000);
+        });
+
+        if (result.kind === "ok" && result.keypoints) {
+          lastKeyedRef.current = result.keypoints;
+        }
+
+        logger.model(`Frame detection complete: ${modelId}`, {
+          detail:
+            result.kind === "ok"
+              ? `1 person detected · score ${(result.score * 100).toFixed(0)}%`
+              : result.kind === "multi-person"
+                ? `${result.personCount} persons detected`
+                : "no person detected",
+        });
+
+        return result;
+      } catch (e) {
+        setModelStatus("error");
+        const errMsg = e instanceof Error ? e.message : "Unknown error";
+        logger.model(`Frame detection failed: ${modelId}`, {
+          detail: errMsg,
+          level: "error",
+        });
+        throw e;
+      }
+    },
+    [],
+  );
+
   return {
     detect,
+    detectFrame,
     checkPose,
     preloadModel,
     uninstallModel,

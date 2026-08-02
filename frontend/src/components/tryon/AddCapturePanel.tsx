@@ -525,13 +525,18 @@ export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen }: 
                     <div className="py-4 space-y-3">
                       {previewImage && (
                         <div className="relative w-full h-[40vh] sm:h-48 rounded-xl overflow-hidden bg-muted mb-2">
+                          {/* Issue 4 fix — image stays CLEAR (no blur) during
+                              validation. Only the clean loading indicator
+                              (spinner) overlays the image. The previous
+                              `backdrop-blur-sm` + `bg-foreground/30` overlay
+                              made the image hard to see while waiting. */}
                           <img
                             src={previewImage}
                             alt="Validating"
                             className="absolute inset-0 h-full w-full object-contain"
                           />
-                          <div className="absolute inset-0 bg-foreground/30 backdrop-blur-sm grid place-items-center pointer-events-none">
-                            <Loader2 className="h-6 w-6 animate-spin text-primary-foreground" />
+                          <div className="absolute inset-0 grid place-items-center pointer-events-none">
+                            <Loader2 className="h-6 w-6 animate-spin text-primary-foreground drop-shadow-lg" />
                           </div>
                           <button
                             onClick={() => setFullscreen(true)}

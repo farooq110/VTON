@@ -11,6 +11,7 @@ import { GlobalHeader } from "@/components/layout/GlobalHeader";
 import { ProductCard } from "@/components/products/ProductCard";
 import { ProductTryOnModal } from "@/components/products/ProductTryOnModal";
 import { FiltersModal } from "@/components/products/FiltersModal";
+import { BrandedLoader } from "@/components/BrandedLoader";
 import { logger } from "@/lib/logger";
 import type { Product } from "@/types";
 
@@ -284,11 +285,10 @@ export function ProductsPage() {
           5 columns on xl screens so the layout breathes on wide monitors. */}
       <main className="flex-1 px-3 sm:px-6 lg:px-10 py-4 sm:py-6">
         {isLoading ? (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 lg:gap-6">
-            {Array.from({ length: 8 }).map((_, i) => (
-              <div key={i} className="aspect-[4/5] rounded-2xl bg-muted animate-pulse" />
-            ))}
-          </div>
+          /* Issue 3 fix — use the reusable BrandedLoader (inline variant)
+             instead of bare pulse skeletons for a consistent, branded
+             loading experience across the app. */
+          <BrandedLoader variant="inline" label="Loading collection…" />
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <p className="text-muted-foreground">No pieces found</p>

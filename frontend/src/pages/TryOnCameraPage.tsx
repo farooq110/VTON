@@ -73,14 +73,16 @@ export function TryOnCameraPage() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ─── Entry guard — must have a selected garment before opening camera ──
-  // Spec: "it should not go to tryon camera page until it select garments"
+  // Issue 2 fix — friendly warning (not red error) when no garment is
+  // selected. The user is just being redirected back to pick a garment;
+  // that's an info situation, not an error.
   useEffect(() => {
     const currentSelected = useAuthStore.getState().selectedProductId;
     if (!currentSelected) {
       toast({
-        title: "Select a garment first",
+        title: "Please select a garment first",
         description: "Browse the collection and pick a piece to try on before opening the camera.",
-        variant: "destructive",
+        // No `variant: "destructive"` — friendly warning.
       });
       navigate("/products", { replace: true });
     }
@@ -223,10 +225,11 @@ export function TryOnCameraPage() {
   const tryWithSavedImage = useCallback((img: SavedCaptureImage) => {
     stopCamera();
     if (!product) {
+      // Issue 2 fix — friendly warning (not red error).
       toast({
-        title: "Select a product first",
+        title: "Please select a garment first",
         description: "Browse the collection and pick a garment to try on.",
-        variant: "destructive",
+        // No `variant: "destructive"` — friendly warning.
       });
       return; // stay on the camera page — don't navigate away
     }

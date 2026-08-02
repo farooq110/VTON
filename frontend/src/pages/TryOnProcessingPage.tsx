@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Loader2 } from "lucide-react";
+import { Loader2, AlertCircle } from "lucide-react";
 import { useAuthStore } from "@/lib/store";
 import { useTryOnOrchestrator } from "@/hooks/useTryOnOrchestrator";
 import { useTaglineRotation } from "@/hooks/useTaglineRotation";
 import { useProducts } from "@/hooks/useProducts";
 import { useToast } from "@/components/ui/toast";
+import { GlobalHeader } from "@/components/layout/GlobalHeader";
+import { BrandedLoader } from "@/components/BrandedLoader";
 
 interface LocalStage {
   id: string;
@@ -28,10 +30,6 @@ export function TryOnProcessingPage() {
   const skipStages = sessionStorage.getItem("nova_skip_stages") === "true";
 
   // ─── PENDING CAPTURE (from camera) ────────────────────────────────────
-  // When the user captures from the camera, the image is NOT yet in the
-  // store — it's stored as a "pending capture" in sessionStorage. The
-  // orchestrator saves it to the store AFTER validation passes. So we need
-  // to read it from sessionStorage here to display it + run validation.
   const [pendingCapture, setPendingCapture] = useState<{
     dataUrl: string;
     sizeKb: number;
@@ -49,8 +47,6 @@ export function TryOnProcessingPage() {
     }
   }, []);
 
-  // The effective capture: either the store-backed one (saved image) or the
-  // pending one (just captured from camera, not yet saved).
   const effectiveCapture = capture ?? (pendingCapture
     ? {
         id: "pending",
@@ -71,6 +67,9 @@ export function TryOnProcessingPage() {
   const [modelProgress, setModelProgress] = useState(0);
   const startedRef = useRef(false);
 
+  // Issue 5 fix — tagline rotation STOPS when an error occurs (so the user
+  // isn't distracted by spinning text while reading the error). The
+  // `disabled` arg already handles this.
   const tagline = useTaglineRotation(settings.taglineRefreshMs, !error);
 
   const orchestrator = useTryOnOrchestrator({
@@ -84,10 +83,12 @@ export function TryOnProcessingPage() {
       }));
     },
     onError: (msg) => {
+      // Issue 5 fix — when an error occurs, STOP the fitting loader
+      // (conic spinner) and SHOW THE CAPTURED IMAGE instead. The error
+      // banner below the image explains what went wrong + offers
+      // "Retake photo" and "Skip & try anyway" actions.
       setError(msg);
       setStages((prev) => prev.map((s) => (s.status === "active" ? { ...s, status: "failed" } : s)));
-      // Show a toast for all validation errors (including timeouts) so the
-      // user gets immediate feedback.
       toast({
         title: "Validation error",
         description: msg,
@@ -107,14 +108,14 @@ export function TryOnProcessingPage() {
   useEffect(() => {
     if (startedRef.current || !effectiveCapture || !product) return;
     startedRef.current = true;
-    // Wrap in try/catch so any unhandled error in the orchestrator surfaces
-    // a friendly error instead of leaving the page stuck on "Generating…".
     orchestrator.run(effectiveCapture.dataUrl, product, { skipStages }).catch((e) => {
       const msg = e instanceof Error ? e.message : "Something went wrong during try-on.";
+      // Issue 5 fix — surface the error so the loader stops + image shows.
       setError(msg);
     });
   }, [effectiveCapture, product]);
 
+  // Progress bar animation — STOPS when an error occurs (Issue 5 fix).
   useEffect(() => {
     if (error) return;
     const id = setInterval(() => setProgress((p) => Math.min(95, p + Math.random() * 4)), 250);
@@ -122,52 +123,84 @@ export function TryOnProcessingPage() {
   }, [error]);
 
   if (!effectiveCapture || !product) {
-    return <div className="min-h-screen grid place-items-center bg-background"><button onClick={() => navigate("/tryon/camera")} className="text-primary underline">Open camera</button></div>;
+    // Issue 3 fix — use the reusable BrandedLoader instead of a bare link.
+    return (
+      <div className="min-h-screen flex flex-col bg-background">
+        <GlobalHeader title="Try-on" backTo="/tryon/camera" />
+        <BrandedLoader variant="full" label="Preparing your fitting…" />
+      </div>
+    );
   }
 
-  // NOTE: When a validation error occurs, we do NOT replace the whole UI
-  // with a separate error screen. Instead, we keep the processing UI
-  // (image + stages + progress) visible and show the error INLINE as a
-  // banner at the top of the stages panel, with "Retake photo" and
-  // "Skip & try anyway" buttons. This matches the user's expectation:
-  // "keep the UI unchanged, just show the error inside the same interface."
+  // Issue 5 fix — when an error occurs, the fitting loader (conic spinner)
+  // STOPS and the CAPTURED IMAGE is shown instead. The error banner below
+  // the image explains what went wrong. The header now includes a back
+  // button + the hamburger menu (via GlobalHeader) so the user can
+  // navigate away.
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
-      <header className="sticky top-0 z-20 glass border-b border-border p-4">
-        <p className="text-xs uppercase tracking-widest text-muted-foreground">Generating</p>
-        <h1 className="font-display text-lg truncate">{product.name}</h1>
-      </header>
+      {/* Issue 5 fix — replaced the bare <header> with GlobalHeader so the
+          user has a BACK BUTTON + the hamburger menu (with all nav entries:
+          Home, Collection, Camera, Gallery, etc.) just like every other
+          page in the app. */}
+      <GlobalHeader
+        title="Try-on"
+        subtitle={error ? "Validation failed" : "Generating"}
+        backTo="/tryon/camera"
+      />
 
       <main className="flex-1 grid grid-cols-1 lg:grid-cols-2">
         <section className="relative bg-foreground overflow-hidden min-h-[50vh] grid place-items-center">
-          <img src={effectiveCapture.dataUrl} alt="" className="absolute inset-0 h-full w-full object-cover blur-2xl scale-110 opacity-60" />
-          <div className="absolute inset-0 bg-gradient-to-br from-primary/40 via-foreground/60 to-foreground" />
-          <div className="relative z-10 text-center text-primary-foreground p-6 max-w-md">
-            <div className="relative h-32 w-32 mx-auto">
-              <div className="absolute inset-0 rounded-full animate-conic" style={{ background: "conic-gradient(from 0deg, transparent, oklch(0.78 0.13 80), transparent 60%)" }} />
-              <div className="absolute inset-2 rounded-full bg-foreground/80 grid place-items-center">
-                <div className="h-16 w-16 rounded-full bg-gradient-to-br from-accent/30 to-primary/40" />
+          {error ? (
+            // Issue 5 fix — SHOW THE CAPTURED IMAGE when an error occurs
+            // (instead of the spinning conic loader). The user can see
+            // what they captured + decide to retake or skip.
+            <>
+              <img
+                src={effectiveCapture.dataUrl}
+                alt="Your capture"
+                className="absolute inset-0 h-full w-full object-contain"
+              />
+              <div className="absolute top-4 left-4 right-4 z-10 rounded-xl bg-destructive/90 text-destructive-foreground px-4 py-2 flex items-center gap-2 backdrop-blur-sm">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <p className="text-xs font-medium truncate">Fitting failed — see details →</p>
               </div>
-            </div>
-            <p key={tagline} className="mt-6 font-display text-2xl font-light shimmer-text">{tagline}</p>
-          </div>
+            </>
+          ) : (
+            // Normal processing state — conic loader + tagline.
+            <>
+              <img src={effectiveCapture.dataUrl} alt="" className="absolute inset-0 h-full w-full object-cover blur-2xl scale-110 opacity-60" />
+              <div className="absolute inset-0 bg-gradient-to-br from-primary/40 via-foreground/60 to-foreground" />
+              <div className="relative z-10 text-center text-primary-foreground p-6 max-w-md">
+                <div className="relative h-32 w-32 mx-auto">
+                  <div className="absolute inset-0 rounded-full animate-conic" style={{ background: "conic-gradient(from 0deg, transparent, oklch(0.78 0.13 80), transparent 60%)" }} />
+                  <div className="absolute inset-2 rounded-full bg-foreground/80 grid place-items-center">
+                    <div className="h-16 w-16 rounded-full bg-gradient-to-br from-accent/30 to-primary/40" />
+                  </div>
+                </div>
+                <p key={tagline} className="mt-6 font-display text-2xl font-light shimmer-text">{tagline}</p>
+              </div>
+            </>
+          )}
         </section>
 
         <section className="p-6 sm:p-10 lg:p-14 flex flex-col">
-          <h2 className="font-display text-2xl sm:text-3xl">Your fitting is in progress</h2>
-          <p className="text-sm text-muted-foreground mt-2">Running {stages.length} stages before sending your photo to the AI.</p>
+          <h2 className="font-display text-2xl sm:text-3xl">
+            {error ? "Fitting could not complete" : "Your fitting is in progress"}
+          </h2>
+          <p className="text-sm text-muted-foreground mt-2">
+            {error
+              ? "Something went wrong during validation. Review the error below — you can retake your photo or skip validation and proceed to the AI."
+              : `Running ${stages.length} stages before sending your photo to the AI.`}
+          </p>
 
-          {/* ─── INLINE ERROR BANNER ────────────────────────────────────────
-              When a validation error occurs, we keep the processing UI
-              (image + stages + progress) visible and show the error INLINE
-              as a banner here, with "Retake photo" and "Skip & try anyway"
-              buttons. The UI is NOT replaced by a separate error screen. */}
+          {/* ─── INLINE ERROR BANNER ──────────────────────────────────────── */}
           {error && (
             <div className="mt-4 rounded-xl border border-destructive/40 bg-destructive/10 p-4 space-y-3">
               <div className="flex items-start gap-3">
                 <div className="h-8 w-8 rounded-full bg-destructive/20 text-destructive grid place-items-center shrink-0">
-                  <span className="text-lg leading-none">!</span>
+                  <AlertCircle className="h-5 w-5" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-destructive">Validation error</p>
@@ -216,18 +249,21 @@ export function TryOnProcessingPage() {
             </div>
           )}
 
-          <div className="mt-6">
-            <div className="flex justify-between text-xs text-muted-foreground mb-2">
-              <span>Progress</span><span>{Math.round(progress)}%</span>
+          {/* Progress bar — hidden when an error occurs (Issue 5 fix). */}
+          {!error && (
+            <div className="mt-6">
+              <div className="flex justify-between text-xs text-muted-foreground mb-2">
+                <span>Progress</span><span>{Math.round(progress)}%</span>
+              </div>
+              <div className="h-2 rounded-full bg-muted overflow-hidden">
+                <div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} />
+              </div>
             </div>
-            <div className="h-2 rounded-full bg-muted overflow-hidden">
-              <div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} />
-            </div>
-          </div>
+          )}
           <ol className="mt-8 space-y-3">
             {stages.map((s) => (
-              <li key={s.id} className={`rounded-xl border px-4 py-3 flex items-center gap-3 ${s.status === "active" ? "border-accent/40 bg-accent/5" : s.status === "passed" ? "border-primary/20 bg-primary/5" : "border-border/60 bg-card/40"}`}>
-                <div className="h-2 w-2 rounded-full bg-muted-foreground/40" />
+              <li key={s.id} className={`rounded-xl border px-4 py-3 flex items-center gap-3 ${s.status === "active" ? "border-accent/40 bg-accent/5" : s.status === "passed" ? "border-primary/20 bg-primary/5" : s.status === "failed" ? "border-destructive/40 bg-destructive/5" : "border-border/60 bg-card/40"}`}>
+                <div className={`h-2 w-2 rounded-full ${s.status === "failed" ? "bg-destructive" : s.status === "passed" ? "bg-primary" : "bg-muted-foreground/40"}`} />
                 <div className="flex-1">
                   <p className="text-sm">{s.label}</p>
                   {s.detail && <p className="text-xs text-muted-foreground">{s.detail}</p>}

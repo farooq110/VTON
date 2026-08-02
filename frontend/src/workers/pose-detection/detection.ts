@@ -19,6 +19,7 @@ import type {
   RawImage,
   Tensor,
   TransformersModule,
+  Keypoint,
 } from "./types";
 import { getModelAndProcessor } from "./model-cache";
 import { loadTransformers } from "./transformers-loader";
@@ -28,6 +29,26 @@ import { parseYolov8PoseOutput } from "./yolov8-parser";
 export interface RunDetectionOptions {
   modelId: DetectionModelId;
   imageDataUrl: string;
+  minScore: number;
+  nmsIouThreshold?: number;
+  maxPersons?: number;
+}
+
+/**
+ * Issue 2 fix — zero-copy transferable frame detection options.
+ *
+ * Instead of a base64 data URL string (which is serialised + parsed on
+ * every postMessage, allocating ~33% extra memory for the base64
+ * expansion), the main thread transfers the raw RGBA pixel buffer
+ * directly. The buffer is MOVED into the worker via the postMessage
+ * transfer list — no copy, no GC pressure at 30+ FPS.
+ */
+export interface RunDetectionFrameOptions {
+  modelId: DetectionModelId;
+  /** RGBA pixel buffer (length = width × height × 4). Already transferred. */
+  buffer: ArrayBuffer;
+  width: number;
+  height: number;
   minScore: number;
   nmsIouThreshold?: number;
   maxPersons?: number;
@@ -76,17 +97,77 @@ export async function runDetection(opts: RunDetectionOptions): Promise<Detection
     maxPersons,
   });
 
+  return toDetectionResult(persons);
+}
+
+/**
+ * Issue 2 fix — runs person detection on a raw RGBA pixel buffer that was
+ * TRANSFERRED (zero-copy) from the main thread.
+ *
+ * This avoids the base64 data URL round-trip entirely:
+ *   1. Main thread creates an ImageData from the canvas (`ctx.getImageData`).
+ *   2. Main thread transfers `imageData.data.buffer` to the worker.
+ *   3. Worker wraps it in a `RawImage` via `new RawImage(data, w, h, 4)`.
+ *   4. The processor + model run as normal.
+ *
+ * At 30 FPS this eliminates ~30 large string allocations per second,
+ * which was the main source of GC pauses and UI jank.
+ */
+export async function runDetectionFrame(opts: RunDetectionFrameOptions): Promise<DetectionResult> {
+  const {
+    modelId,
+    buffer,
+    width,
+    height,
+    minScore,
+    nmsIouThreshold = DEFAULT_NMS_IOU_THRESHOLD,
+    maxPersons = DEFAULT_MAX_PERSONS,
+  } = opts;
+
+  const { model, processor } = await loadModelWithTimeout(modelId);
+
+  const transformers = await loadTransformers();
+  // Wrap the transferred buffer in a Uint8ClampedArray view (no copy —
+  // this is just a typed-array view over the SAME ArrayBuffer). Then
+  // construct a RawImage directly, bypassing `fromURL` (which would
+  // decode a base64 data URL — the slow path we're avoiding).
+  const pixels = new Uint8ClampedArray(buffer);
+  const image = new transformers.RawImage(pixels, width, height, 4);
+
+  const inputs = (await (processor as (image: RawImage) => Promise<ProcessorInputs>)(image));
+  const modelInputs = buildModelInputs(inputs);
+
+  const outputs = (await (model as (input: Record<string, unknown>) => Promise<unknown>)(modelInputs)) as Record<string, unknown>;
+  const outputTensor = extractOutputTensor(outputs);
+  if (!outputTensor) {
+    throw new Error("Model output missing detection tensor");
+  }
+
+  const { persons } = parseYolov8PoseOutput(outputTensor, {
+    minScore,
+    imgWidth: width,
+    imgHeight: height,
+    nmsIouThreshold,
+    maxPersons,
+  });
+
+  return toDetectionResult(persons);
+}
+
+/** Shared tail — converts the NMS-surviving persons array into a DetectionResult. */
+function toDetectionResult(
+  persons: { score: number; keypoints: unknown[]; bbox: unknown }[],
+): DetectionResult {
   if (persons.length === 0) return { kind: "no-person", score: 0 };
   if (persons.length > 1) {
     return { kind: "multi-person", personCount: persons.length, score: persons[0].score };
   }
-
   const person = persons[0];
   return {
     kind: "ok",
     personCount: 1,
     score: person.score,
-    keypoints: person.keypoints,
+    keypoints: person.keypoints as Keypoint[],
   };
 }
 

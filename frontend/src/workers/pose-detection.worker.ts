@@ -50,6 +50,12 @@ import { handleMessage } from "./pose-detection/message-handler";
 // gets its own MessagePort. The worker's module-level state (model cache,
 // loaded models, transformers.js module) is SHARED across all ports — that's
 // the whole point of SharedWorker.
+//
+// Issue 5 fix — per-port state (like the OffscreenCanvas overlay) is
+// cleaned up lazily: when `postToPort` / `broadcast` fails to send to a
+// closed port, that port is removed from the registry. The OffscreenCanvas
+// itself is GC'd by the browser once the port is gone. We don't need an
+// explicit `onclose` handler (MessagePort doesn't expose one).
 (self as unknown as SharedWorkerGlobalScope).onconnect = (e: MessageEvent) => {
   const port: MessagePort = e.ports[0];
   addPort(port);

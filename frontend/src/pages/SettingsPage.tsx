@@ -11,6 +11,7 @@ import { GlobalHeader } from "@/components/layout/GlobalHeader";
 import { BrandSection } from "@/components/settings/BrandSection";
 import { ThemeSection } from "@/components/settings/ThemeSection";
 import { Button } from "@/components/ui/button";
+import { Accordion, AccordionItem } from "@/components/ui/accordion";
 
 /**
  * SettingsPage — control panel for brand identity, detection models, posture
@@ -127,82 +128,57 @@ export function SettingsPage() {
       />
 
       <main className="flex-1 px-3 sm:px-6 lg:px-10 py-6 max-w-4xl mx-auto w-full">
-        <div className="space-y-4">
+        {/* Issue 7 fix — all heavy-content sections are now wrapped in an
+            Accordion so the user can collapse sections they're not
+            interested in. The first section (Brand identity) defaults to
+            open; the rest default to collapsed so the page doesn't feel
+            like an endless scroll. */}
+        <Accordion>
           {/* Brand identity — manager-only */}
           {canBrand && (
-            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
-              <div className="flex items-center gap-2">
-                <ImageIcon className="h-5 w-5 text-accent" />
-                <div>
-                  <h2 className="font-display text-lg">Brand identity</h2>
-                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Upload your boutique&apos;s cover image, set the brand name, and add a logo. These appear on the home screen banner that customers see first.
-                  </p>
-                </div>
-              </div>
+            <AccordionItem
+              title="Brand identity"
+              description="Upload your boutique's cover image, set the brand name, and add a logo."
+              icon={<ImageIcon className="h-5 w-5" />}
+              defaultOpen
+            >
               <BrandSection />
-            </section>
+            </AccordionItem>
           )}
 
           {/* Theme — manager-only */}
           {canBrand && (
-            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
-              <div className="flex items-center gap-2">
-                <Palette className="h-5 w-5 text-accent" />
-                <div>
-                  <h2 className="font-display text-lg">Theme</h2>
-                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Pick a colour scheme, font, and base text size. Changes apply instantly across the entire app — no refresh needed.
-                  </p>
-                </div>
-              </div>
+            <AccordionItem
+              title="Theme"
+              description="Pick a colour scheme, font, and base text size. Changes apply instantly."
+              icon={<Palette className="h-5 w-5" />}
+            >
               <ThemeSection />
-            </section>
+            </AccordionItem>
           )}
 
-          {/* ─── MODEL DOWNLOADS (shared, top of feature settings) ───────
-              This section lists every available model with a Download /
-              Uninstall button. Downloading a model here makes it available
-              for BOTH the person-detection section AND the posture-estimation
-              section below — the download is shared.
-
-              The download state is PERSISTENT (survives page refresh) via
-              the model-persistence layer (localStorage + Cache Storage
-              verification). */}
+          {/* ─── MODEL DOWNLOADS (shared, top of feature settings) ─────── */}
           {canFeatures && (
-            <section className="rounded-2xl bg-card border border-border p-6">
-              <div className="flex items-center gap-2 mb-3">
-                <HardDrive className="h-5 w-5 text-accent" />
-                <div>
-                  <h2 className="font-display text-lg">Model downloads</h2>
-                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Download model weights once — they&apos;re cached in your browser and <strong>survive page refreshes</strong>. Each downloaded model becomes available for both person detection (Stage 1) and posture estimation (Stage 3). Use <strong>Uninstall</strong> to remove a model and free up space.
-                  </p>
-                </div>
-              </div>
+            <AccordionItem
+              title="Model downloads"
+              description="Download model weights once — cached in your browser, survive page refreshes."
+              icon={<HardDrive className="h-5 w-5" />}
+            >
               <div className="space-y-2">
                 {DETECTION_MODELS.map((m) => (
                   <ModelDownloadRow key={m.id} model={m} />
                 ))}
               </div>
-            </section>
+            </AccordionItem>
           )}
 
-          {/* ─── PERSON DETECTION MODEL (Stage 1) ─────────────────────────
-              Select which downloaded model to use for person detection.
-              Click anywhere on the card to select it (not just the radio).
-              Has its OWN tuning parameters below the selection. */}
+          {/* ─── PERSON DETECTION MODEL (Stage 1) ───────────────────────── */}
           {canFeatures && (
-            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
-              <div className="flex items-center gap-2">
-                <Scan className="h-5 w-5 text-accent" />
-                <div>
-                  <h2 className="font-display text-lg">Person detection model</h2>
-                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Stage 1 — detects how many people are in the camera frame. Rejects 0 persons or multiple persons. Pick any downloaded model below; its parameters are configured in the section underneath.
-                  </p>
-                </div>
-              </div>
+            <AccordionItem
+              title="Person detection model"
+              description="Stage 1 — detects how many people are in the camera frame. Pick any downloaded model."
+              icon={<Scan className="h-5 w-5" />}
+            >
               <div className="space-y-2">
                 {DETECTION_MODELS.map((m) => (
                   <SelectableModelCard
@@ -249,25 +225,16 @@ export function SettingsPage() {
                   onChange={(v) => setPersonParams({ maxPersons: v })}
                 />
               </div>
-            </section>
+            </AccordionItem>
           )}
 
-          {/* ─── POSTURE ESTIMATION MODEL (Stage 3) ──────────────────────
-              Select which downloaded model to use for posture checks.
-              Independent from the person-detection model — you can use
-              YOLOv8n for detection and YOLOv8s for posture, or any
-              combination. Has its OWN threshold parameters below. */}
+          {/* ─── POSTURE ESTIMATION MODEL (Stage 3) ────────────────────── */}
           {canFeatures && (
-            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
-              <div className="flex items-center gap-2">
-                <Target className="h-5 w-5 text-accent" />
-                <div>
-                  <h2 className="font-display text-lg">Posture estimation model</h2>
-                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Stage 3 — checks the user&apos;s posture (shoulder tilt, face yaw/pitch, body visibility). Independent from the person-detection model above; pick any downloaded model.
-                  </p>
-                </div>
-              </div>
+            <AccordionItem
+              title="Posture estimation model"
+              description="Stage 3 — checks shoulder tilt, face yaw/pitch, body visibility. Independent from person detection."
+              icon={<Target className="h-5 w-5" />}
+            >
               <div className="space-y-2">
                 {DETECTION_MODELS.map((m) => (
                   <SelectableModelCard
@@ -294,18 +261,16 @@ export function SettingsPage() {
                 <NumberField label="Face pitch (deg)" value={settings.poseThresholds.facePitchDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ facePitchDeg: v })} />
                 <NumberField label="Body visibility (0–1)" value={settings.poseThresholds.minBodyVisibility} step={0.05} min={0.3} max={0.95} onChange={(v) => setThresholds({ minBodyVisibility: v })} />
               </div>
-            </section>
+            </AccordionItem>
           )}
 
-          {/* Compression */}
+          {/* Image optimisation */}
           {canFeatures && (
-            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
-              <div>
-                <h2 className="font-display text-lg">Image optimisation</h2>
-                <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                  Before sending to the AI, captured photos are compressed to stay under the target file size. Smaller files upload faster; too small may lose detail.
-                </p>
-              </div>
+            <AccordionItem
+              title="Image optimisation"
+              description="Compress captured photos before sending to the AI. Smaller files upload faster."
+              icon={<ImageIcon className="h-5 w-5" />}
+            >
               <NumberField label="Max file size (KB)" value={settings.compression.maxFileSizeKb} step={100} min={100} max={5000} onChange={(v) => setCompression({ maxFileSizeKb: v })} />
               <NumberField label="Min quality (0–1)" value={settings.compression.minQuality} step={0.05} min={0.3} max={0.95} onChange={(v) => setCompression({ minQuality: v })} />
               <NumberField label="Quality step" value={settings.compression.qualityStep} step={0.01} min={0.01} max={0.2} onChange={(v) => setCompression({ qualityStep: v })} />
@@ -318,41 +283,28 @@ export function SettingsPage() {
                 <span className="text-sm">Strip PNG/EXIF chunks</span>
                 <input type="checkbox" checked={settings.compression.stripChunks} onChange={(e) => setCompression({ stripChunks: e.target.checked })} />
               </label>
-            </section>
+            </AccordionItem>
           )}
 
           {/* Capture */}
           {canFeatures && (
-            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
-              <div>
-                <h2 className="font-display text-lg">Capture</h2>
-                <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                  Set the countdown timer before the camera captures and how fast taglines rotate during AI processing. The TryOn AI endpoint is configured server-side — no API keys needed on the client.
-                </p>
-              </div>
+            <AccordionItem
+              title="Capture"
+              description="Set the countdown timer before the camera captures + tagline rotation speed."
+              icon={<Scan className="h-5 w-5" />}
+            >
               <NumberField label="Capture timer (s)" value={settings.captureTimerSeconds} step={1} min={1} max={10} onChange={(v) => handleUpdate({ captureTimerSeconds: v })} />
               <NumberField label="Tagline refresh (s)" value={settings.taglineRefreshMs / 1000} step={0.5} min={1} max={8} onChange={(v) => handleUpdate({ taglineRefreshMs: v * 1000 })} />
-            </section>
+            </AccordionItem>
           )}
 
-          {/* ─── PRICE RANGE BOUNDS ──────────────────────────────────────
-              Controls the min/max bounds of the price slider in the
-              FiltersModal. Defaults to { min: 0, max: 10000 } (rounded).
-              The boutique manager can narrow or widen this range to match
-              the catalogue's actual price distribution. Values are always
-              coerced to non-negative integers, and max is clamped to be
-              >= min so the slider can never render with an invalid range. */}
+          {/* ─── PRICE RANGE BOUNDS ────────────────────────────────────── */}
           {canFeatures && (
-            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
-              <div className="flex items-center gap-2">
-                <DollarSign className="h-5 w-5 text-accent" />
-                <div>
-                  <h2 className="font-display text-lg">Price range bounds</h2>
-                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Controls the min/max bounds of the price slider shown in the product Filters modal. Defaults to <strong>$0 – $10,000</strong> (rounded). Adjust to match your catalogue&apos;s actual price distribution. The FiltersModal slider always uses these bounds — customers can pick any value inside them.
-                  </p>
-                </div>
-              </div>
+            <AccordionItem
+              title="Price range bounds"
+              description="Controls the min/max bounds of the price slider in the Filters modal. Defaults to $0 – $10,000."
+              icon={<DollarSign className="h-5 w-5" />}
+            >
               <NumberField
                 label="Min price ($)"
                 value={settings.priceRange.min}
@@ -377,21 +329,16 @@ export function SettingsPage() {
               >
                 <RotateCcw className="h-3.5 w-3.5" /> Reset to defaults ($0 – $10,000)
               </Button>
-            </section>
+            </AccordionItem>
           )}
 
           {/* Debug & Telemetry */}
           {canFeatures && (
-            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
-              <div className="flex items-center gap-2">
-                <Shield className="h-5 w-5 text-accent" />
-                <div>
-                  <h2 className="font-display text-lg">Debug &amp; telemetry</h2>
-                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                    Turn on detailed event logging (navigation, interactions, camera, capture, try-on, network) for troubleshooting. Only visible to managers and developers. Error logs include actionable fix tips. Error-level logs can also be sent to the backend for remote diagnostics.
-                  </p>
-                </div>
-              </div>
+            <AccordionItem
+              title="Debug & telemetry"
+              description="Detailed event logging + error telemetry to the backend. Only visible to managers + developers."
+              icon={<Shield className="h-5 w-5" />}
+            >
               <label className="flex items-center justify-between">
                 <div>
                   <span className="text-sm font-medium">Enable debug logging</span>
@@ -406,36 +353,36 @@ export function SettingsPage() {
                 </div>
                 <input type="checkbox" checked={settings.telemetryEnabled} onChange={(e) => handleUpdate({ telemetryEnabled: e.target.checked })} />
               </label>
-            </section>
+            </AccordionItem>
           )}
+        </Accordion>
 
-          {/* Locked messages */}
-          {!canFeatures && canBrand && (
-            <div className="rounded-2xl border border-dashed border-border/60 bg-muted/30 p-6 text-center">
-              <Shield className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
-              <p className="text-sm font-medium">Feature settings are developer-only</p>
-              <p className="text-xs text-muted-foreground mt-1.5 max-w-md mx-auto">
-                Detection models, posture thresholds, image compression, and debug logging are managed by the developer role.
-              </p>
-            </div>
-          )}
-          {canFeatures && !canBrand && (
-            <div className="rounded-2xl border border-dashed border-border/60 bg-muted/30 p-6 text-center">
-              <ImageIcon className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
-              <p className="text-sm font-medium">Brand settings are manager-only</p>
-              <p className="text-xs text-muted-foreground mt-1.5 max-w-md mx-auto">
-                Cover image, brand name, and logo are managed by the manager role.
-              </p>
-            </div>
-          )}
-
-          {/* Footer note */}
-          <div className="flex items-start gap-2 text-sm text-muted-foreground leading-relaxed">
-            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-            <p>
-              <strong>How roles work:</strong> Managers can edit brand identity (cover, name, logo). Developers can edit feature behaviour (models, thresholds, compression, AI). Super Admins can edit everything.
+        {/* Locked messages — kept OUTSIDE the accordion (always visible). */}
+        {!canFeatures && canBrand && (
+          <div className="mt-4 rounded-2xl border border-dashed border-border/60 bg-muted/30 p-6 text-center">
+            <Shield className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
+            <p className="text-sm font-medium">Feature settings are developer-only</p>
+            <p className="text-xs text-muted-foreground mt-1.5 max-w-md mx-auto">
+              Detection models, posture thresholds, image compression, and debug logging are managed by the developer role.
             </p>
           </div>
+        )}
+        {canFeatures && !canBrand && (
+          <div className="mt-4 rounded-2xl border border-dashed border-border/60 bg-muted/30 p-6 text-center">
+            <ImageIcon className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
+            <p className="text-sm font-medium">Brand settings are manager-only</p>
+            <p className="text-xs text-muted-foreground mt-1.5 max-w-md mx-auto">
+              Cover image, brand name, and logo are managed by the manager role.
+            </p>
+          </div>
+        )}
+
+        {/* Footer note */}
+        <div className="mt-4 flex items-start gap-2 text-sm text-muted-foreground leading-relaxed">
+          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+          <p>
+            <strong>How roles work:</strong> Managers can edit brand identity (cover, name, logo). Developers can edit feature behaviour (models, thresholds, compression, AI). Super Admins can edit everything.
+          </p>
         </div>
       </main>
     </div>

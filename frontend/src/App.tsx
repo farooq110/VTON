@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { BrandedLoader } from "@/components/BrandedLoader";
 import { ToastProvider, Toaster } from "@/components/ui/toast";
 import { ActivityLogPanel } from "@/components/tryon/ActivityLogPanel";
 import { useAuthStore } from "@/lib/store";
@@ -160,17 +161,10 @@ export default function App() {
   }, []);
 
   // Don't render any routes until the persisted state is rehydrated.
-  // Without this, the user briefly sees /signin before being redirected
-  // to /home (because isAuthed is false during the hydration window).
+  // Issue 3 fix — use the reusable BrandedLoader (logo + app name) instead
+  // of a bare spinner so the boot experience feels intentional + premium.
   if (!hydrated) {
-    return (
-      <div className="min-h-screen grid place-items-center bg-background">
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-10 w-10 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-          <p className="text-xs uppercase tracking-widest text-muted-foreground">Loading Atelier Nova…</p>
-        </div>
-      </div>
-    );
+    return <BrandedLoader variant="full" label="Loading…" sublabel="Preparing your boutique" />;
   }
 
   return (
@@ -179,9 +173,7 @@ export default function App() {
         <ScrollToTop />
         <Suspense
           fallback={
-            <div className="min-h-screen grid place-items-center bg-background">
-              <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-            </div>
+            <BrandedLoader variant="full" label="Loading…" />
           }
         >
           <Routes>

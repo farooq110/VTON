@@ -26,7 +26,8 @@ import {
   evictModel,
   loadModelWithProgress,
 } from "./model-cache";
-import { runDetection } from "./detection";
+import { runDetection, runDetectionFrame } from "./detection";
+import { initCanvas, drawPose, clearCanvas, dropCanvas } from "./canvas-overlay";
 
 /**
  * Handles a single inbound message from a connected port.
@@ -34,6 +35,9 @@ import { runDetection } from "./detection";
  * Errors thrown by `load` are broadcast to all ports (they affect everyone).
  * Errors from `detect` are routed only to the requesting port, since other
  * tabs may have unrelated in-flight detections.
+ *
+ * Canvas messages (Issue 5) are per-port — each tab owns its own
+ * OffscreenCanvas, so the canvas operations are scoped to the asking port.
  */
 export async function handleMessage(
   port: MessagePort,
@@ -52,6 +56,10 @@ export async function handleMessage(
         await handleDetect(port, msg);
         break;
 
+      case "detect-frame":
+        await handleDetectFrame(port, msg);
+        break;
+
       case "status":
         postToPort(port, {
           type: "status",
@@ -60,7 +68,23 @@ export async function handleMessage(
         break;
 
       case "evict":
-        evictModel(msg.modelId);
+        // Issue 7 fix — evictModel is now async (also clears the IndexedDB
+        // manifest). We await it so the broadcast "model evicted" log
+        // arrives after the IDB delete has settled.
+        await evictModel(msg.modelId);
+        break;
+
+      // ─── Issue 5: OffscreenCanvas overlay rendering ──────────────────
+      case "init-canvas":
+        initCanvas(port, msg.canvas);
+        break;
+
+      case "draw-pose":
+        drawPose(port, msg.keypoints, msg.bbox, msg.score);
+        break;
+
+      case "clear-canvas":
+        clearCanvas(port);
         break;
     }
   } catch (err) {
@@ -69,6 +93,14 @@ export async function handleMessage(
       message: err instanceof Error ? err.message : "Worker error",
     });
   }
+}
+
+/**
+ * Drops any per-port state when a port disconnects (tab closed / refresh).
+ * Called from the SharedWorker entry file when the port's `onclose` fires.
+ */
+export function handlePortDisconnect(port: MessagePort): void {
+  dropCanvas(port);
 }
 
 /**
@@ -104,6 +136,47 @@ async function handleDetect(
     const detection = await runDetection({
       modelId,
       imageDataUrl,
+      minScore,
+      nmsIouThreshold,
+      maxPersons,
+    });
+    postToPort(port, { type: "detect-result", reqId, ok: true, detection });
+  } catch (err) {
+    postToPort(port, {
+      type: "detect-result",
+      reqId,
+      ok: false,
+      error: err instanceof Error ? err.message : "Detection failed",
+    });
+  }
+}
+
+/**
+ * Issue 2 fix — runs a zero-copy transferable-frame detection.
+ *
+ * The main thread sends a raw RGBA `ArrayBuffer` via the postMessage
+ * transfer list (no base64 string, no copy). The buffer is MOVED into the
+ * worker, wrapped in a `Uint8ClampedArray` view, and fed directly to the
+ * model processor via `new RawImage(pixels, w, h, 4)`.
+ *
+ * Result is routed back to the requesting port only — same protocol as
+ * `handleDetect`, so the main-thread hook doesn't need to know which path
+ * was used.
+ */
+async function handleDetectFrame(
+  port: MessagePort,
+  msg: Extract<WorkerInboundMessage, { type: "detect-frame" }>,
+): Promise<void> {
+  const { modelId, buffer, width, height, minScore, reqId } = msg;
+  const nmsIouThreshold = msg.nmsIouThreshold ?? DEFAULT_NMS_IOU_THRESHOLD;
+  const maxPersons = msg.maxPersons ?? DEFAULT_MAX_PERSONS;
+
+  try {
+    const detection = await runDetectionFrame({
+      modelId,
+      buffer,
+      width,
+      height,
       minScore,
       nmsIouThreshold,
       maxPersons,

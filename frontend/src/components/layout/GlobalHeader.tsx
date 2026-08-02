@@ -48,19 +48,19 @@ export function GlobalHeader({ title, subtitle, showBack = true, backTo, rightSl
 
   const nav = (path: string) => {
     logger.interaction(`Nav menu: ${path}`, { component: "GlobalHeader" });
-    // Spec: "it should not go to tryon camera page until it select garments"
-    // If the user clicks "Try-on camera" without a selected product, show a
-    // toast and KEEP THE MENU OPEN (don't close it or navigate away).
+    // Issue 2 fix — if the user clicks "Try-on camera" without a selected
+    // garment, show a FRIENDLY WARNING toast (not a red destructive error).
+    // The user is just being reminded to pick a garment — that's an
+    // info/warning situation, not an error. We keep the menu open so the
+    // user can pick a different nav entry after seeing the toast.
     if (path === "/tryon/camera") {
       const selectedId = useAuthStore.getState().selectedProductId;
       if (!selectedId) {
         toast({
-          title: "Select a product first",
+          title: "Please select a garment first",
           description: "Browse the collection and pick a garment before opening the try-on camera.",
-          variant: "destructive",
+          // No `variant: "destructive"` — friendly warning, not an error.
         });
-        // Deliberately do NOT close the menu — the user may want to pick
-        // a different nav entry after seeing the toast.
         return;
       }
     }

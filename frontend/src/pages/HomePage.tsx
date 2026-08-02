@@ -95,15 +95,15 @@ export function HomePage() {
   };
 
   const navTo = (path: string) => {
-    // Spec: "it should not go to tryon camera page until it select garments"
-    // If no product is selected, show a toast and KEEP THE MENU OPEN.
+    // Issue 2 fix — friendly warning (not red error) when no garment is
+    // selected and the user tries to open the try-on camera.
     if (path === "/tryon/camera") {
       const selectedId = useAuthStore.getState().selectedProductId;
       if (!selectedId) {
         toast({
-          title: "Select a product first",
+          title: "Please select a garment first",
           description: "Browse the collection and pick a garment before opening the try-on camera.",
-          variant: "destructive",
+          // No `variant: "destructive"` — friendly warning.
         });
         return; // don't close menu, don't navigate
       }

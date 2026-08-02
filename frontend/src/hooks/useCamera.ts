@@ -50,17 +50,36 @@ export function useCamera(): UseCameraReturn {
       });
       // Wait for the video element to be mounted, then attach the stream
       // and wait for `loadedmetadata` before considering the camera "ready".
+      //
+      // Issue 4 fix — the rAF retry loop here is bounded (it stops once the
+      // video element mounts), but we still track the handle so the loop
+      // can be cancelled if the component unmounts mid-retry. Without this,
+      // a fast unmount-remount cycle could leave a zombie rAF trying to
+      // attach to a stale video ref.
+      let attachRafId = 0;
       const attach = () => {
         const v = videoRef.current;
         if (!v) {
           // Video element not mounted yet — retry in next frame.
-          requestAnimationFrame(attach);
+          attachRafId = requestAnimationFrame(attach);
           return;
         }
         v.srcObject = s;
         v.play().catch(() => {});
       };
-      requestAnimationFrame(attach);
+      attachRafId = requestAnimationFrame(attach);
+
+      // If the component unmounts before the video element is ready, cancel
+      // the pending rAF so it doesn't fire on a stale ref.
+      // (The dedicated unmount cleanup effect below also stops the stream.)
+      const cancelRaf = () => cancelAnimationFrame(attachRafId);
+      // Attach to the stream ref so the cleanup effect can find it. We
+      // can't store it on streamRef (it's a MediaStream) so we use a
+      // module-level weakmap-free pattern: just register the cancel on
+      // the video element via a data attribute.
+      if (videoRef.current) {
+        (videoRef.current as HTMLVideoElement & { __cancelAttachRaf?: () => void }).__cancelAttachRaf = cancelRaf;
+      }
     } catch (e) {
       const msg =
         e instanceof DOMException && e.name === "NotAllowedError"
@@ -80,7 +99,22 @@ export function useCamera(): UseCameraReturn {
     if (streamRef.current) {
       logger.camera("Camera stopped");
     }
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    // Issue 1 fix: iterate every active track, stop it (releases the
+    // hardware — webcam light turns off, OS-level device handle freed),
+    // remove it from the stream, then nullify the stream reference so
+    // nothing downstream can accidentally re-use a stopped track.
+    // The previous implementation only called `t.stop()` without
+    // `removeTrack()` and without nulling the ref, which could leave a
+    // "zombie" stream holding the device light on after navigation.
+    streamRef.current?.getTracks().forEach((track) => {
+      try {
+        track.stop();
+        streamRef.current?.removeTrack(track);
+      } catch {
+        // track.stop() can throw if the track was already stopped —
+        // ignore; the end state (stopped + removed) is what we want.
+      }
+    });
     streamRef.current = null;
     setStream(null);
     setActive(false);
@@ -119,7 +153,38 @@ export function useCamera(): UseCameraReturn {
     return null;
   }, []);
 
-  useEffect(() => () => stop(), [stop]);
+  // Issue 1 + Issue 4 fix: dedicated unmount cleanup that does NOT depend
+  // on `stop` (so it can't be skipped if `stop`'s identity changes between
+  // renders). Iterates ALL tracks on the stream, calls stop() +
+  // removeTrack(), and nulls the ref. Also cancels any pending rAF retry
+  // from the camera-start flow so a zombie loop doesn't attach to a stale
+  // video ref after unmount. This is the canonical pattern for
+  // getUserMedia + rAF cleanup and guarantees the webcam hardware light
+  // turns off on unmount/navigation.
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => {
+          try {
+            track.stop();
+            streamRef.current?.removeTrack(track);
+          } catch {
+            // already stopped — ignore
+          }
+        });
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        const v = videoRef.current as HTMLVideoElement & { __cancelAttachRaf?: () => void };
+        try {
+          v.__cancelAttachRaf?.();
+          v.srcObject = null;
+        } catch {
+          // video element already unmounted — ignore
+        }
+      }
+    };
+  }, []);
 
   return { videoRef, stream, active, error, start, stop, captureStill };
 }

@@ -45,18 +45,27 @@ export function CapturesGalleryPage() {
   const products = useAuthStore((s) => s.products);
   const { toast } = useToast();
 
+  // Issue 1 fix — the "Camera" button in the captures gallery now opens the
+  // SAME AddCapturePanel modal that the Try-On Camera page uses (in
+  // controlled mode). This means the user can capture/upload a person
+  // image directly from the gallery, and it runs the EXACT SAME 3-stage
+  // validation pipeline (person detection → compression → posture check)
+  // from `usePoseDetection` + `useImageCompression`. No separate
+  // validation file is created — the AddCapturePanel is the single source
+  // of truth for person-image validation.
+  const [showCapturePanel, setShowCapturePanel] = useState(false);
+
   const product = useMemo(
     () => products.find((p) => p.id === selectedProductId),
     [products, selectedProductId],
   );
 
-  // The camera button in the captures gallery should simply open the camera
-  // so the user can capture and upload a person's image. It does NOT require
-  // a selected product — the user can capture a person photo here without
-  // intending to try-on yet. The product requirement is enforced only when
-  // the user clicks "Try on with this" on a saved image.
-  const goToCamera = () => {
-    navigate("/tryon/camera");
+  // Issue 1 fix — opens the AddCapturePanel modal. The modal handles the
+  // full capture/upload + validation flow and saves the validated image
+  // directly to the gallery. No garment selection is required here — this
+  // is just adding a person photo to the gallery.
+  const openCapturePanel = () => {
+    setShowCapturePanel(true);
   };
 
   // Select mode — same pattern as the camera sidebar (consistent UI)
@@ -86,16 +95,17 @@ export function CapturesGalleryPage() {
     });
   };
 
-  // Spec: "in person image when user click do no tryon directly first ask for
-  // user to insure user want in modal with both garments and person image"
-  // If no product is selected, show a toast but DON'T navigate away — the
-  // user stays on the captures gallery page.
+  // Issue 2 fix — when no garment is selected and the user clicks
+  // "Try on with this", show a FRIENDLY WARNING toast (not a red
+  // destructive error). The user is just being reminded to pick a
+  // garment — that's an info/warning situation, not an error.
   const tryWithImage = (img: SavedCaptureImage) => {
     if (!product) {
       toast({
-        title: "Select a product first",
+        title: "Please select a garment first",
         description: "Browse the collection and pick a garment to try on with this image.",
-        variant: "destructive",
+        // No `variant: "destructive"` — this is a friendly warning, not an
+        // error. The default variant renders as a clean info toast.
       });
       return; // stay on the page — don't navigate to /products
     }
@@ -119,7 +129,7 @@ export function CapturesGalleryPage() {
 
       <main className="flex-1 px-3 sm:px-6 lg:px-10 py-4 sm:py-6">
         {savedImages.length === 0 ? (
-          <EmptyState onOpenCamera={goToCamera} />
+          <EmptyState onOpenCamera={openCapturePanel} />
         ) : (
           <>
             {/* Toolbar — Add Image button is now beside Camera (in the page
@@ -181,7 +191,11 @@ export function CapturesGalleryPage() {
                     {/* Add Image button — beside Camera, in the page body.
                         The AddCapturePanel modal opens as a fixed overlay. */}
                     <AddCapturePanel />
-                    <Button variant="outline" size="sm" onClick={goToCamera} className="h-9 gap-1.5 text-xs">
+                    {/* Issue 1 fix — Camera button now opens the SAME
+                        AddCapturePanel modal (in controlled mode), which
+                        runs the same 3-stage validation as the Try-On
+                        Camera page. No separate validation file created. */}
+                    <Button variant="outline" size="sm" onClick={openCapturePanel} className="h-9 gap-1.5 text-xs">
                       <Camera className="h-3.5 w-3.5" /> Camera
                     </Button>
                   </>
@@ -230,6 +244,16 @@ export function CapturesGalleryPage() {
           </>
         )}
       </main>
+
+      {/* Issue 1 fix — the AddCapturePanel modal in CONTROLLED mode. This
+          is the SAME component used by the Try-On Camera page's sidebar,
+          so it runs the EXACT SAME 3-stage validation pipeline
+          (usePoseDetection + useImageCompression). No separate validation
+          file is created. */}
+      <AddCapturePanel
+        open={showCapturePanel}
+        onClose={() => setShowCapturePanel(false)}
+      />
 
       {/* Confirmation dialog — "Try on with this image?"
           Shows BOTH garment + person image side by side, centered. */}
