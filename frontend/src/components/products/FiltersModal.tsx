@@ -26,6 +26,17 @@ import type { Product, ProductFilters } from "@/types";
  * previous filters.
  *
  * The "Reset" button resets the DRAFT (not the committed filters) to empty.
+ *
+ * ─── PRICE RANGE FROM SETTINGS ─────────────────────────────────────────
+ * The min/max bounds of the price slider are read from
+ * `settings.priceRange` (managed on the Settings page). The defaults are
+ * { min: 0, max: 10000 } (rounded). This lets the boutique manager widen
+ * or narrow the price filter without touching code.
+ *
+ * ─── CATEGORY FILTER ───────────────────────────────────────────────────
+ * The category filter (previously a `<select>` on the main page) now lives
+ * inside this modal alongside the other filters. The main page no longer
+ * renders its own category picker — filters are centralised here.
  */
 export interface FiltersModalProps {
   open: boolean;
@@ -36,6 +47,7 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
   const products = useAuthStore((s) => s.products);
   const committedFilters = useAuthStore((s) => s.productFilters);
   const setProductFilters = useAuthStore((s) => s.setProductFilters);
+  const priceRange = useAuthStore((s) => s.settings.priceRange);
 
   // ─── DRAFT STATE ──────────────────────────────────────────────────────
   // The draft is initialized from the COMMITTED filters when the modal opens.
@@ -55,7 +67,18 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
   }, [open]);
 
   const facets = collectFilterFacets(products);
-  const draftActiveCount = countActiveFilters(draft);
+  // Effective price bounds — read from settings (managed on Settings page).
+  // Fallback to {0, 10000} for legacy persisted state without priceRange.
+  const priceBounds = {
+    min: Math.max(0, Math.round(priceRange?.min ?? 0)),
+    max: Math.max(0, Math.round(priceRange?.max ?? 10000)),
+  };
+  // If the persisted bounds are inverted (min > max), normalise them so the
+  // slider can't render with min >= max (which would crash Radix Slider).
+  if (priceBounds.max < priceBounds.min) {
+    priceBounds.max = priceBounds.min;
+  }
+  const draftActiveCount = countActiveFilters(draft, facets);
 
   const patchDraft = (patch: Partial<ProductFilters>) => {
     setDraft((d) => ({ ...d, ...patch }));
@@ -73,6 +96,10 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
       ? draft.colors.filter((c) => c !== color)
       : [...draft.colors, color];
     patchDraft({ colors: next });
+  };
+
+  const toggleCategory = (category: string) => {
+    patchDraft({ category: draft.category === category ? "all" : category });
   };
 
   const resetDraft = () => {
@@ -155,40 +182,90 @@ export function FiltersModal({ open, onClose }: FiltersModalProps) {
 
               <Separator />
 
-              {/* Price range */}
+              {/* Category filter — moved here from the main products page. */}
+              {facets.categories.length > 0 && (
+                <>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-medium">Category</p>
+                      {draft.category !== "all" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => patchDraft({ category: "all" })}
+                          className="h-7 text-xs text-muted-foreground"
+                        >
+                          Clear category
+                        </Button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => patchDraft({ category: "all" })}
+                        className={`min-w-[2.75rem] h-10 px-3 rounded-xl border text-sm font-medium transition ${
+                          draft.category === "all"
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : "border-border bg-background hover:border-foreground/40"
+                        }`}
+                      >
+                        All
+                      </button>
+                      {facets.categories.map((c) => (
+                        <button
+                          key={c}
+                          onClick={() => toggleCategory(c)}
+                          className={`min-w-[2.75rem] h-10 px-3 rounded-xl border text-sm font-medium transition ${
+                            draft.category === c
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : "border-border bg-background hover:border-foreground/40"
+                          }`}
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <Separator />
+                </>
+              )}
+
+              {/* Price range — bounds driven by settings.priceRange */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <p className="text-sm font-medium">Price range</p>
                   <span className="text-xs font-mono text-muted-foreground">
-                    ${draft.priceMin ?? facets.priceMin} – ${draft.priceMax ?? facets.priceMax}
+                    ${draft.priceMin ?? priceBounds.min} – ${draft.priceMax ?? priceBounds.max}
                   </span>
                 </div>
                 <div className="space-y-3">
                   <div>
                     <p className="text-xs text-muted-foreground mb-2">
-                      Min: ${draft.priceMin ?? facets.priceMin}
+                      Min: ${draft.priceMin ?? priceBounds.min}
                     </p>
                     <Slider
-                      value={[draft.priceMin ?? facets.priceMin]}
-                      min={facets.priceMin}
-                      max={facets.priceMax}
+                      value={[draft.priceMin ?? priceBounds.min]}
+                      min={priceBounds.min}
+                      max={priceBounds.max}
                       step={10}
                       onValueChange={([v]) => patchDraft({ priceMin: v })}
                     />
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-2">
-                      Max: ${draft.priceMax ?? facets.priceMax}
+                      Max: ${draft.priceMax ?? priceBounds.max}
                     </p>
                     <Slider
-                      value={[draft.priceMax ?? facets.priceMax]}
-                      min={facets.priceMin}
-                      max={facets.priceMax}
+                      value={[draft.priceMax ?? priceBounds.max]}
+                      min={priceBounds.min}
+                      max={priceBounds.max}
                       step={10}
                       onValueChange={([v]) => patchDraft({ priceMax: v })}
                     />
                   </div>
                 </div>
+                <p className="text-[10px] text-muted-foreground">
+                  Range configurable from Settings → Price range bounds.
+                </p>
                 <Button
                   variant="ghost"
                   size="sm"
@@ -301,14 +378,19 @@ function collectFilterFacets(products: Product[]) {
   return { categories, sizes, colors, priceMin, priceMax };
 }
 
-/** Count how many filters are active (excludes query + category). */
-function countActiveFilters(filters: ProductFilters): number {
+/** Count how many filters are active (excludes query). */
+function countActiveFilters(filters: ProductFilters, facets: { categories: string[] }): number {
   let count = 0;
+  if (filters.category && filters.category !== "all") count += 1;
   if (filters.sizes.length > 0) count += 1;
   if (filters.colors.length > 0) count += 1;
   if (filters.priceMin !== null || filters.priceMax !== null) count += 1;
   if (filters.inStockOnly) count += 1;
   if (filters.newArrivalsOnly) count += 1;
+  // facets is included in the signature to keep the call site stable; we
+  // don't actually use it here but it lets future expansion (e.g. counting
+  // only "available" categories) without changing call sites.
+  void facets;
   return count;
 }
 

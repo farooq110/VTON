@@ -97,12 +97,15 @@ const pendingDetects = new Map<
 >();
 let nextReqId = 1;
 
-// ─── Module-level worker singleton (one worker for the whole app) ────── //
-// The worker is created ONCE on first use and NEVER terminated for the
-// rest of the app session. This ensures transformers.js + model weights
-// stay in the worker's in-memory cache across route changes — no
-// re-downloading, no re-loading.
-let workerSingleton: Worker | null = null;
+// ─── Module-level worker singleton (SHARED WORKER — survives refresh) ── //
+// A SharedWorker's in-memory state (loaded transformers.js module + model
+// weights) PERSISTS across page refreshes and across tabs of the same
+// origin. This means transformers.js + the default model are loaded ONCE
+// — on the very first app start — and stay loaded for all subsequent
+// refreshes. On refresh, the new page connects to the EXISTING
+// SharedWorker, which responds with "loaded" immediately without any
+// actual loading or log entries.
+let workerSingleton: SharedWorker | null = null;
 
 type ModelCacheListener = (modelId: DetectionModelId, isDownloaded: boolean) => void;
 const modelCacheListeners = new Set<ModelCacheListener>();
@@ -112,29 +115,29 @@ function notifyModelCacheChange(modelId: DetectionModelId, isDownloaded: boolean
 }
 
 /**
- * Lazily creates the pose-detection worker. Reused across all hook instances
- * so the model cache inside the worker survives route changes.
+ * Lazily creates the pose-detection SharedWorker. Reused across all hook
+ * instances AND across page refreshes (SharedWorker persists).
  *
- * The worker's `onmessage` handler is set ONCE (when the worker is created).
- * It routes ALL message types — including `detect-result` and `progress` —
- * using the module-level `pendingDetects` map. This ensures detect results
- * are always delivered to the correct caller, even if the hook instance
- * that initiated the detect has unmounted.
+ * The worker's `port.onmessage` handler is set ONCE (when the worker is
+ * created). It routes ALL message types — including `detect-result` and
+ * `progress` — using the module-level `pendingDetects` map. This ensures
+ * detect results are always delivered to the correct caller, even if the
+ * hook instance that initiated the detect has unmounted.
  */
-function getWorker(): Worker {
+function getWorker(): SharedWorker {
   if (workerSingleton) return workerSingleton;
-  workerSingleton = new Worker(
+  workerSingleton = new SharedWorker(
     new URL("../workers/pose-detection.worker.ts", import.meta.url),
-    { type: "module" },
+    { type: "module", name: "vton-pose-detection" },
   );
 
   // ─── SINGLE message handler for ALL message types ────────────────────
-  // This handler is set ONCE when the worker is created and never removed.
-  // It handles EVERY message type — loaded, log, error, progress,
-  // detect-result — so there's no need for per-hook addEventListener
-  // listeners. This eliminates the "first detect stays pending" bug where
-  // the per-hook listener was removed on unmount before the result arrived.
-  workerSingleton.onmessage = (e: MessageEvent) => {
+  // Set on `worker.port` (not `worker` directly) because SharedWorker
+  // communicates via MessagePort. This handler is set ONCE when the worker
+  // is created and never removed. It handles EVERY message type — loaded,
+  // log, error, progress, detect-result — so there's no need for per-hook
+  // addEventListener listeners.
+  workerSingleton.port.onmessage = (e: MessageEvent) => {
     const msg = e.data;
     if (!msg || typeof msg !== "object") return;
 
@@ -142,7 +145,6 @@ function getWorker(): Worker {
       case "loaded": {
         markModelDownloaded(msg.modelId as DetectionModelId);
         notifyModelCacheChange(msg.modelId as DetectionModelId, true);
-        // Resolve any pending preloadModel() call for this model.
         const pendingLoad = pendingLoads.get(msg.modelId as DetectionModelId);
         if (pendingLoad) {
           pendingLoads.delete(msg.modelId as DetectionModelId);
@@ -151,7 +153,6 @@ function getWorker(): Worker {
         break;
       }
       case "progress": {
-        // Route progress to the pending load's progressCb (if any).
         const pl = pendingLoads.get(msg.modelId as DetectionModelId);
         if (pl?.progressCb) {
           pl.progressCb(msg.progress);
@@ -185,9 +186,17 @@ function getWorker(): Worker {
     }
   };
 
-  workerSingleton.onerror = (err) => {
-    logger.model(`[worker] fatal error: ${err.message}`, { level: "error" });
+  // SharedWorker-level error handler (fires if the worker itself crashes
+  // or fails to load). Per-port errors are handled by port.onmessage
+  // (errors arrive as { type: "error", message } messages).
+  workerSingleton.onerror = (err: Event) => {
+    const msg = (err as ErrorEvent)?.message ?? "unknown error";
+    logger.model(`[worker] fatal error: ${msg}`, { level: "error" });
   };
+
+  // Start receiving messages on the port. (Setting port.onmessage above
+  // implicitly calls start(), but we call it explicitly for clarity.)
+  workerSingleton.port.start();
 
   return workerSingleton;
 }
@@ -290,7 +299,7 @@ export function usePoseDetection() {
         const reqId = nextReqId++;
         const result = await new Promise<PersonDetectionResult>((resolve, reject) => {
           pendingDetects.set(reqId, { resolve, reject });
-          worker.postMessage({
+          worker.port.postMessage({
             type: "detect",
             modelId,
             imageDataUrl,
@@ -423,7 +432,7 @@ export function usePoseDetection() {
             loadEntry!.reject = reject;
           });
           pendingLoads.set(modelId, loadEntry);
-          worker.postMessage({ type: "load", modelId });
+          worker.port.postMessage({ type: "load", modelId });
 
           // Timeout — don't hang forever.
           setTimeout(() => {
@@ -471,8 +480,11 @@ export function usePoseDetection() {
 
   /**
    * Uninstalls a model — removes it from the tracking set AND deletes the
-   * weight files from the browser's Cache Storage. The model can be
-   * re-downloaded later by clicking "Download" again.
+   * weight files from the browser's Cache Storage. Posts an "evict"
+   * message to the worker so the worker drops the model from its in-memory
+   * `loadedModels` / `modelCache` too. transformers.js itself stays loaded
+   * (SINGLE-INIT GUARD) — only the per-model weights get re-read on next
+   * download.
    */
   const uninstallModel = useCallback(
     async (modelId: DetectionModelId): Promise<boolean> => {
@@ -480,6 +492,12 @@ export function usePoseDetection() {
       const ok = await uninstallModelCache(modelId);
       markModelUninstalled(modelId);
       notifyModelCacheChange(modelId, false);
+      try {
+        const worker = getWorker();
+        worker.port.postMessage({ type: "evict", modelId });
+      } catch {
+        // Best-effort.
+      }
       if (ok) {
         logger.model(`Model uninstalled: ${modelId}`);
       } else {
@@ -542,9 +560,15 @@ export async function warmDownloadedModels(
   defaultPersonModelId: DetectionModelId,
   defaultPostureModelId?: DetectionModelId,
 ): Promise<void> {
-  // ─── GUARD: only run once per session ────────────────────────────────
+  // ─── GUARD: only run once per main-thread session ───────────────────
+  // NOTE: On page refresh, the main thread module is re-evaluated so this
+  // guard resets. However, the SHARED WORKER's `loadedModels` set persists
+  // across refreshes. So on refresh, the "load" messages below are sent,
+  // but the worker responds with "loaded" IMMEDIATELY (no actual loading,
+  // no log entries). This is the desired behaviour: transformers.js + the
+  // model are loaded ONCE on the first app start, and stay loaded for all
+  // subsequent refreshes.
   if (warmingStarted) {
-    logger.model("Model warming already started this session — skipping");
     return;
   }
   warmingStarted = true;
@@ -565,30 +589,27 @@ export async function warmDownloadedModels(
       }
 
       if (modelsToDownload.size === 0) {
-        logger.model("No models downloaded and defaults are uninstalled — skipping auto-download (user must manually download from Settings)");
         return;
       }
 
-      logger.model(`No models downloaded — auto-downloading: ${Array.from(modelsToDownload).join(", ")}`);
-      // Post "load" for each model. The worker's central onmessage handler
-      // (set in getWorker) receives the "loaded" response and calls
-      // markModelDownloaded. We don't need per-call listeners here — this
-      // eliminates the duplicate addEventListener/removeEventListener
-      // pattern that was causing stale listeners.
+      // Send "load" messages silently. The WORKER will log the actual
+      // download progress (from CDN) — we don't need to log here.
       for (const modelId of modelsToDownload) {
-        worker.postMessage({ type: "load", modelId });
+        worker.port.postMessage({ type: "load", modelId });
       }
       return;
     }
 
-    // Warm each DOWNLOADED model into the worker's memory.
-    // Models in the "uninstalled" set are NOT in the "downloaded" set, so
-    // they're automatically skipped here.
-    logger.model(`Warming ${downloaded.size} downloaded model(s) into worker memory…`);
+    // ─── SILENT WARMING ────────────────────────────────────────────────
+    // Send "load" messages for each downloaded model. On the FIRST app
+    // start, the SharedWorker actually loads them (and logs the progress).
+    // On REFRESH, the SharedWorker already has them in memory, so it
+    // responds with "loaded" immediately — no loading, no logs, no CDN
+    // fetch. This is the key benefit of SharedWorker: the warming is a
+    // no-op on refresh.
     for (const modelId of downloaded) {
-      worker.postMessage({ type: "load", modelId });
+      worker.port.postMessage({ type: "load", modelId });
     }
-    logger.model(`Warming requests sent for ${downloaded.size} model(s)`);
   } catch (err) {
     logger.model(`Model warming failed`, {
       detail: err instanceof Error ? err.message : "Unknown error",

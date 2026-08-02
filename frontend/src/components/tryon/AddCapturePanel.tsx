@@ -138,6 +138,14 @@ export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen }: 
     setError(null);
   }, []);
 
+  // ─── NO GARMENT VALIDATION ────────────────────────────────────────────
+  // This modal is for UPLOADING a person image to the gallery — it does
+  // NOT require a selected garment. The previous behaviour showed a
+  // "Select a garment first" toast on button click, which blocked the
+  // user from simply adding a photo. That validation has been removed
+  // entirely: the modal opens immediately and the user can upload freely.
+  // Garment selection is enforced only when the user actually tries to
+  // TRY ON a saved image (see CapturesGalleryPage.tryWithImage).
   const openModal = () => {
     logger.interaction("Add person image modal opened", { component: "AddCapturePanel" });
     if (!isControlled) setInternalOpen(true);

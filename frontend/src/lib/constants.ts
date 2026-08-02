@@ -1,4 +1,5 @@
 import type { DetectionModel, TryOnSettings } from "@/types";
+import { DEFAULT_PRICE_RANGE } from "@/types";
 
 /**
  * Detection models registered for selection in Settings.
@@ -64,6 +65,8 @@ export const MODEL_REPO: Record<string, string> = {
 };
 
 export const DEFAULT_SETTINGS: TryOnSettings = {
+  /** Price range bounds for the FiltersModal (editable from Settings). */
+  priceRange: { ...DEFAULT_PRICE_RANGE },
   /** Stage 1 model — person detection. */
   personDetectionModelId: "yolov8n-pose",
   /** Stage 3 model — posture estimation. Independent selection. */
@@ -142,6 +145,16 @@ export function migrateSettings(persisted: Partial<TryOnSettings>): TryOnSetting
   merged.poseThresholds = { ...defaults.poseThresholds, ...merged.poseThresholds };
   merged.compression = { ...defaults.compression, ...merged.compression };
   merged.theme = { ...defaults.theme, ...merged.theme };
+  // Ensure priceRange is always present with sensible defaults so the
+  // FiltersModal never reads undefined bounds. Older persisted settings (pre
+  // price-range feature) won't have this field — fall back to the defaults.
+  merged.priceRange = {
+    min: Math.max(0, Math.round(Number(merged.priceRange?.min ?? defaults.priceRange.min))),
+    max: Math.max(0, Math.round(Number(merged.priceRange?.max ?? defaults.priceRange.max))),
+  };
+  if (merged.priceRange.max < merged.priceRange.min) {
+    merged.priceRange.max = merged.priceRange.min;
+  }
 
   return merged;
 }

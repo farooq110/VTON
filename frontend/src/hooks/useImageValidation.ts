@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import { usePoseDetection, type PoseKeypoint } from "@/hooks/usePoseDetection";
 import { useImageCompression, type CompressionResult } from "@/hooks/useImageCompression";
 import { useAuthStore } from "@/lib/store";
+import { logger } from "@/lib/logger";
 import { dataUrlSizeKb } from "@/lib/utils";
 import { isModelDownloaded } from "@/lib/model-persistence";
 import type { ImageCompressionSettings, PoseThresholds } from "@/types";
@@ -240,23 +241,47 @@ export function useImageValidation() {
         }
       }
 
-      // ─── STAGE 2: Compression ───────────────────────────────────────────
+      // ─── STAGE 2: Compression (image "elevation" / optimisation) ────────
+      // "Elevation" = bringing the raw capture up to a uniform standard
+      // before it's sent to the AI: strip metadata, normalise quality,
+      // shrink dimensions, and confirm the final size is under target.
+      // This stage takes the bulk of validation time, so we log a clear
+      // BEFORE → AFTER description that also explains WHY it's slow
+      // (multi-cycle quality+dimension reduction).
       let compressed: CompressionResult;
       {
         const stageStart = Date.now();
         const target = compressionSettings.maxFileSizeKb;
         const initialSize = dataUrlSizeKb(imageDataUrl);
         callbacks?.onStageStart?.("stage2-compression", "Optimising image", `${initialSize.toFixed(0)} KB → target ${target} KB`);
-        log("compression", "Stage 2: compression started", `Initial: ${initialSize.toFixed(0)} KB, target: ${target} KB`);
+        // Detailed "what we're about to do" log — explains the slow path
+        // (quality reduction → dimension reduction → metadata strip) so
+        // the user understands why this stage takes extra time.
+        log(
+          "compression",
+          "Stage 2: image elevation started",
+          [
+            `Before: ${initialSize.toFixed(0)} KB · target ≤ ${target} KB.`,
+            `Plan: strip EXIF/chunks → reduce quality in ${(compressionSettings.qualityStep).toFixed(2)} steps (floor ${compressionSettings.minQuality}) → shrink dimensions by ${Math.round(compressionSettings.dimensionStep * 100)}% per cycle (floor 20%).`,
+            `This multi-cycle reduction is the slow part — each cycle re-encodes the image until it fits under the target.`,
+          ].join(" "),
+        );
 
         try {
           compressed = await compress(imageDataUrl, compressionSettings);
-          const detail = `${initialSize.toFixed(0)} KB → ${compressed.sizeKb.toFixed(0)} KB (${compressed.strategy}, ${compressed.cycles} cycles)`;
-          log("compression", "Stage 2 PASSED: image compressed", detail, "info", Date.now() - stageStart);
+          // AFTER log — surfaces the final size, strategy used, and number
+          // of cycles so the user can see exactly what changed.
+          const detail = [
+            `After: ${compressed.sizeKb.toFixed(0)} KB (was ${initialSize.toFixed(0)} KB).`,
+            `Strategy: ${compressed.strategy} · ${compressed.cycles} cycle(s).`,
+            `Final quality ${(compressed.finalQuality * 100).toFixed(0)}% · scale ${Math.round(compressed.finalScale * 100)}%.`,
+            `Status: ${compressed.sizeKb <= target ? "within target" : "above target (best-effort)"} — image ${compressed.sizeKb <= target ? "will" : "may still"} upload successfully.`,
+          ].join(" ");
+          log("compression", "Stage 2 PASSED: image elevated", detail, "info", Date.now() - stageStart);
           callbacks?.onStagePass?.("stage2-compression", detail, Date.now() - stageStart);
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Compression failed";
-          log("compression", "Stage 2 ERROR: compression failed", msg, "error", Date.now() - stageStart);
+          log("compression", "Stage 2 ERROR: image elevation failed", msg, "error", Date.now() - stageStart);
           callbacks?.onStageFail?.("stage2-compression", msg);
           // Compression failure is non-fatal — use the original image.
           compressed = {
@@ -314,8 +339,22 @@ export function useImageValidation() {
               callbacks?.onComplete?.(result);
               return result;
             }
-            const detail = `Posture OK — shoulder tilt ${pose.shoulderTiltDeg.toFixed(1)}°, face yaw ${pose.faceYawDeg.toFixed(1)}°, visibility ${Math.round(pose.bodyVisibility * 100)}%`;
+            // SUCCESS — build the detail string defensively (every property
+            // is guaranteed to be a number by `checkPose`, but we coerce
+            // explicitly so a future regression in checkPose can't crash
+            // the log call and silently swallow the success entry).
+            const tilt = Number(pose.shoulderTiltDeg ?? 0).toFixed(1);
+            const yaw = Number(pose.faceYawDeg ?? 0).toFixed(1);
+            const pitch = Number(pose.facePitchDeg ?? 0).toFixed(1);
+            const vis = Math.round(Number(pose.bodyVisibility ?? 0) * 100);
+            const detail = `Posture OK — shoulder tilt ${tilt}°, face yaw ${yaw}°, face pitch ${pitch}°, visibility ${vis}% (${keypoints.length} keypoints)`;
+            // Explicitly log via BOTH the local `log` helper (which routes
+            // to the store's activityLog) AND the global `logger` utility
+            // (which mirrors to the console). Belt-and-braces: if either
+            // path silently no-ops (e.g. debugLogging toggled off mid-flight),
+            // the other still surfaces the success entry.
             log("capture", "Stage 3 PASSED: posture OK", detail, "info", Date.now() - stageStart);
+            logger.capture("Stage 3 PASSED: posture OK", { detail, durationMs: Date.now() - stageStart });
             callbacks?.onStagePass?.("stage3-pose-check", detail, Date.now() - stageStart);
           } else {
             // No keypoints available — pose check passes silently (lenient).

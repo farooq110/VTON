@@ -1,29 +1,58 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
- * pose-detection.worker — offloads YOLOv8n-pose model loading + inference
- * from the main thread so the UI never janks during detection.
+ * pose-detection.worker — SHARED WORKER that offloads YOLOv8n-pose model
+ * loading + inference from the main thread.
+ *
+ * ─── WHY SharedWorker? ─────────────────────────────────────────────────
+ * A SharedWorker's in-memory state PERSISTS across page refreshes (and
+ * across tabs of the same origin). This means transformers.js + the model
+ * weights are loaded into the worker's memory ONCE — on the very first
+ * app start — and stay loaded for ALL subsequent refreshes and navigations.
+ *
+ * With a regular Worker, every page refresh destroys the worker, so
+ * transformers.js re-imports and the model re-loads from Cache Storage
+ * every time — producing "Loading transformers.js from CDN" and
+ * "Loading model" log entries on EVERY refresh.
+ *
+ * With SharedWorker, on refresh:
+ *   1. The new page connects to the EXISTING SharedWorker (via a new port).
+ *   2. The SharedWorker's `loadedModels` set still has the model.
+ *   3. The `load` message handler checks `loadedModels.has(modelId)` → true.
+ *   4. It responds with `{ type: "loaded" }` IMMEDIATELY — no actual
+ *      loading, no log entries, no CDN fetch, no Cache Storage read.
+ *
+ * This satisfies the requirement: "load transformers.js and default model
+ * ONCE at app runtime, NOT on refresh page."
+ *
+ * ─── MESSAGE ROUTING ───────────────────────────────────────────────────
+ * SharedWorker can have multiple connected ports (one per tab). Messages
+ * are routed as follows:
+ *   - Broadcast (loaded, progress, log, error): sent to ALL ports.
+ *   - Routed (detect-result, status): sent ONLY to the port that sent
+ *     the request.
  *
  * This worker:
  *   1. Loads `@huggingface/transformers` from a CDN (esm.sh / jsdelivr).
- *   2. Loads the YOLOv8n-pose model + processor via AutoModel/AutoProcessor
- *      (bypasses the pipeline() task-check that rejects yolov8).
- *   3. Runs inference on an image (data URL or http URL) and parses the
- *      raw ONNX output into person detections + keypoints.
+ *   2. Loads the YOLOv8n-pose model + processor via AutoModel/AutoProcessor.
+ *   3. Runs inference on an image and parses the raw ONNX output.
  *   4. Applies NMS (Non-Maximum Suppression) to remove overlapping boxes.
  *
  * MESSAGE PROTOCOL
  * ─────────────────
- * Main → Worker:
+ * Main → Worker (via port):
  *   { type: "load",   modelId }
  *   { type: "detect", modelId, imageDataUrl, minScore, reqId }
- *   { type: "status" }  // ping cached-state
+ *   { type: "status" }
+ *   { type: "evict",  modelId }
  *
- * Worker → Main:
- *   { type: "progress",    modelId, progress }
- *   { type: "loaded",      modelId }
- *   { type: "detect-result", reqId, ok: true,  detection }
- *   { type: "detect-result", reqId, ok: false, error }
- *   { type: "error",      message }
+ * Worker → Main (via port or broadcast):
+ *   { type: "progress",      modelId, progress }      [broadcast]
+ *   { type: "loaded",        modelId }                [broadcast]
+ *   { type: "detect-result", reqId, ok: true,  detection }  [routed]
+ *   { type: "detect-result", reqId, ok: false, error }     [routed]
+ *   { type: "status",        loadedModels }           [routed]
+ *   { type: "log",           category, message, level }    [broadcast]
+ *   { type: "error",         message }                [broadcast]
  */
 
 /// <reference lib="webworker" />
@@ -60,21 +89,29 @@ const loadedModels = new Set<DetectionModelId>();
 
 let transformersModule: any = null;
 let transformersLoading: Promise<any> | null = null;
+// ─── SINGLE-INIT GUARD ────────────────────────────────────────────────── //
+// Ensures transformers.js is fetched from the CDN EXACTLY ONCE per worker
+// lifetime, even if multiple "load" + "detect" messages race.
+let transformersInitStarted = false;
 
 // ─── CDN module loading ──────────────────────────────────────────────── //
 async function loadTransformers(): Promise<any> {
   if (transformersModule) return transformersModule;
   if (transformersLoading) return transformersLoading;
+  // SINGLE-INIT GUARD — closes the race window between the `transformersLoading`
+  // check above and the assignment below.
+  if (transformersInitStarted) {
+    while (!transformersLoading) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return transformersLoading;
+  }
+  transformersInitStarted = true;
 
   transformersLoading = (async () => {
     for (const url of TRANSFORMERS_CDN_URLS) {
       try {
         postLog("model", `Loading transformers.js from CDN: ${url}`);
-        // transformers.js is a large module (~2MB+ minified). On the first
-        // load from CDN, this import can take 30-60s+ on slower connections.
-        // The browser caches the module after the first successful import,
-        // so subsequent loads are instant. We use a generous 120s timeout
-        // to avoid false failures on slow networks.
         const mod: any = await Promise.race([
           import(/* @vite-ignore */ url),
           new Promise<never>((_, reject) =>
@@ -96,6 +133,7 @@ async function loadTransformers(): Promise<any> {
       }
     }
     transformersLoading = null;
+    transformersInitStarted = false;
     throw new Error("Could not load transformers.js from any CDN.");
   })();
 
@@ -331,74 +369,123 @@ async function runDetection(
   };
 }
 
-// ─── Worker message handling ─────────────────────────────────────────── //
-self.onmessage = async (e: MessageEvent) => {
-  const msg = e.data;
-  if (!msg || typeof msg !== "object") return;
+// ─── SharedWorker port management ────────────────────────────────────── //
+// All connected ports (one per tab). Broadcast messages go to ALL ports;
+// routed messages (detect-result, status) go to the specific port that
+// sent the request.
+const ports = new Set<MessagePort>();
 
-  try {
-    switch (msg.type) {
-      case "load": {
-        const modelId = msg.modelId as DetectionModelId;
-        if (loadedModels.has(modelId)) {
-          (self as any).postMessage({ type: "loaded", modelId });
-          return;
-        }
-        await getModelAndProcessor(modelId, (p) => postProgress(modelId, p));
-        (self as any).postMessage({ type: "loaded", modelId });
-        break;
-      }
-
-      case "detect": {
-        const { modelId, imageDataUrl, minScore, reqId, nmsIouThreshold, maxPersons } = msg;
-        try {
-          const detection = await runDetection(
-            modelId,
-            imageDataUrl,
-            minScore,
-            nmsIouThreshold ?? 0.5,
-            maxPersons ?? 10,
-          );
-          (self as any).postMessage({
-            type: "detect-result",
-            reqId,
-            ok: true,
-            detection,
-          });
-        } catch (err) {
-          (self as any).postMessage({
-            type: "detect-result",
-            reqId,
-            ok: false,
-            error: err instanceof Error ? err.message : "Detection failed",
-          });
-        }
-        break;
-      }
-
-      case "status": {
-        (self as any).postMessage({
-          type: "status",
-          loadedModels: Array.from(loadedModels),
-        });
-        break;
-      }
+/** Broadcast a message to every connected port. */
+function broadcast(msg: any): void {
+  ports.forEach((port) => {
+    try {
+      port.postMessage(msg);
+    } catch {
+      // Port might be closed (tab closed / refresh). Remove it.
+      ports.delete(port);
     }
-  } catch (err) {
-    (self as any).postMessage({
-      type: "error",
-      message: err instanceof Error ? err.message : "Worker error",
-    });
-  }
+  });
+}
+
+// ─── SharedWorker connect handler ────────────────────────────────────── //
+// fires when a new tab/page connects to this SharedWorker. Each connection
+// gets its own MessagePort. The worker's module-level state (modelCache,
+// loadedModels, transformersModule) is SHARED across all ports — that's
+// the whole point of SharedWorker.
+(self as any).onconnect = (e: MessageEvent) => {
+  const port: MessagePort = e.ports[0];
+  ports.add(port);
+  port.start(); // start receiving messages on this port
+
+  port.onmessage = async (e: MessageEvent) => {
+    const msg = e.data;
+    if (!msg || typeof msg !== "object") return;
+
+    try {
+      switch (msg.type) {
+        case "load": {
+          const modelId = msg.modelId as DetectionModelId;
+          // ─── KEY: if the model is already loaded, respond IMMEDIATELY ──
+          // This is what makes the worker SILENT on page refresh. The
+          // SharedWorker's `loadedModels` set persists across refreshes,
+          // so on refresh this branch is taken and NO loading happens —
+          // no "Loading transformers.js from CDN", no "Loading model"
+          // log entries.
+          if (loadedModels.has(modelId)) {
+            broadcast({ type: "loaded", modelId });
+            return;
+          }
+          await getModelAndProcessor(modelId, (p) => postProgress(modelId, p));
+          broadcast({ type: "loaded", modelId });
+          break;
+        }
+
+        case "detect": {
+          const { modelId, imageDataUrl, minScore, reqId, nmsIouThreshold, maxPersons } = msg;
+          try {
+            const detection = await runDetection(
+              modelId,
+              imageDataUrl,
+              minScore,
+              nmsIouThreshold ?? 0.5,
+              maxPersons ?? 10,
+            );
+            // Routed response — only to the port that asked.
+            port.postMessage({
+              type: "detect-result",
+              reqId,
+              ok: true,
+              detection,
+            });
+          } catch (err) {
+            port.postMessage({
+              type: "detect-result",
+              reqId,
+              ok: false,
+              error: err instanceof Error ? err.message : "Detection failed",
+            });
+          }
+          break;
+        }
+
+        case "status": {
+          // Routed response — only to the port that asked.
+          port.postMessage({
+            type: "status",
+            loadedModels: Array.from(loadedModels),
+          });
+          break;
+        }
+
+        // SINGLE-INIT HOOK — drops a model from the worker's in-memory
+        // cache when the user clicks Uninstall, so the next "load" actually
+        // re-fetches the weights. transformers.js itself stays loaded
+        // (SINGLE-INIT GUARD) — only the per-model weights get re-read.
+        case "evict": {
+          const modelId = msg.modelId as DetectionModelId;
+          loadedModels.delete(modelId);
+          modelCache.delete(modelId);
+          inFlightLoads.delete(modelId);
+          postLog("model", `Model evicted from worker cache: ${modelId}`);
+          break;
+        }
+      }
+    } catch (err) {
+      broadcast({
+        type: "error",
+        message: err instanceof Error ? err.message : "Worker error",
+      });
+    }
+  };
 };
 
-// ─── Helpers: post progress + logs back to main thread ───────────────── //
+// ─── Helpers: broadcast progress + logs to all ports ─────────────────── //
 function postProgress(modelId: DetectionModelId, progress: number): void {
-  (self as any).postMessage({ type: "progress", modelId, progress });
+  broadcast({ type: "progress", modelId, progress });
 }
 
 function postLog(category: string, message: string, level: "info" | "warn" | "error" = "info"): void {
-  (self as any).postMessage({ type: "log", category, message, level });
+  broadcast({ type: "log", category, message, level });
 }
 
 export {};

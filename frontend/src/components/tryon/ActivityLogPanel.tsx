@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Activity,
   CheckSquare,
   Clock,
   Copy,
+  Filter,
   Lightbulb,
   Square,
   Trash2,
@@ -23,15 +24,43 @@ import type { ActivityLogEntry } from "@/types";
  * when `settings.debugLogging` is enabled AND the user's role permits it
  * (manager / developer / super_admin — see `canViewActivityLog`).
  *
- * Ported from the Next.js preview's tryon/ActivityLogPanel.tsx and adapted
- * to use the frontend's `useAuthStore` + `@/components/ui/toast`.
+ * ─── RULES OF HOOKS ────────────────────────────────────────────────────
+ * ALL hooks (the four `useState` calls AND the `useMemo` for `filteredLog`)
+ * are declared at the TOP of this component, BEFORE the visibility gate
+ * (`if (!debugLogging || !canViewActivityLog(...)) return null;`).
  *
- * The overlay sits fixed at the bottom-right of the viewport. Tap the pill
- * to expand a card with the full log; each row can be copied, selected
- * (batch copy), or cleared. The log itself lives in the global store so it
- * survives route changes.
+ * The early return only controls whether the JSX is rendered — it must
+ * NEVER skip a hook call. Otherwise React detects a different number of
+ * hooks between renders (e.g. when the user signs in/out and
+ * `debugLogging` or the role flips) and throws
+ * "Rendered more hooks than during the previous render."
+ *
+ * ─── TYPE FILTER ───────────────────────────────────────────────────────
+ * The header has a "Type" dropdown that lets the user filter log entries by
+ * their `category` (auth, navigation, capture, tryon, model, compression,
+ * network, settings, camera, interaction). Selecting "All" (default) shows
+ * every entry. The filter is purely visual — it doesn't mutate the store.
  */
+const CATEGORY_OPTIONS: Array<{ value: ActivityLogEntry["category"] | "all"; label: string }> = [
+  { value: "all", label: "All types" },
+  { value: "auth", label: "Auth" },
+  { value: "navigation", label: "Navigation" },
+  { value: "capture", label: "Capture" },
+  { value: "tryon", label: "Try-on" },
+  { value: "model", label: "Model" },
+  { value: "compression", label: "Compression" },
+  { value: "network", label: "Network" },
+  { value: "settings", label: "Settings" },
+  { value: "camera", label: "Camera" },
+  { value: "interaction", label: "Interaction" },
+];
+
 export function ActivityLogPanel() {
+  // ─── ALL HOOKS DECLARED AT THE TOP, BEFORE ANY CONDITIONAL LOGIC ─────
+  // These five hook calls (4× useState + 1× useMemo) MUST run on every
+  // render, regardless of whether the panel ends up being visible. The
+  // visibility gate below is placed AFTER all hooks so it can never skip
+  // one. This is the canonical React Rules of Hooks pattern.
   const debugLogging = useAuthStore((s) => s.settings.debugLogging);
   const user = useAuthStore((s) => s.user);
   const activityLog = useAuthStore((s) => s.activityLog);
@@ -41,9 +70,24 @@ export function ActivityLogPanel() {
   const [open, setOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
+  const [typeFilter, setTypeFilter] = useState<ActivityLogEntry["category"] | "all">("all");
 
+  // `filteredLog` is memoised BEFORE the early return so the hook count
+  // stays stable across sign-in / sign-out transitions. When the panel is
+  // hidden we don't actually use `filteredLog`, but the hook still has to
+  // be called — its cost is negligible (a single .filter over an array
+  // that's empty or short when the panel is hidden).
+  const filteredLog = useMemo(() => {
+    if (typeFilter === "all") return activityLog;
+    return activityLog.filter((e) => e.category === typeFilter);
+  }, [activityLog, typeFilter]);
+
+  // ─── VISIBILITY GATE — AFTER ALL HOOKS ───────────────────────────────
+  // No hooks may be called below this point. The early return only decides
+  // whether to render the JSX; it never changes the hook count.
   if (!debugLogging || !canViewActivityLog(user?.role)) return null;
 
+  // ─── EVENT HANDLERS (not hooks) ──────────────────────────────────────
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -53,18 +97,18 @@ export function ActivityLogPanel() {
     });
   };
 
-  const selectAll = () => setSelectedIds(new Set(activityLog.map((e) => e.id)));
+  const selectAll = () => setSelectedIds(new Set(filteredLog.map((e) => e.id)));
   const deselectAll = () => setSelectedIds(new Set());
 
   const formatEntry = (e: ActivityLogEntry): string =>
     `[${new Date(e.timestamp).toLocaleTimeString()}] ${e.category.toUpperCase()} | ${e.label}${e.durationMs ? ` (${e.durationMs}ms)` : ""}${e.detail ? `\n  ${e.detail}` : ""}`;
 
   const copyAllLogs = () => {
-    const text = activityLog.map(formatEntry).join("\n\n");
+    const text = filteredLog.map(formatEntry).join("\n\n");
     navigator.clipboard
       .writeText(text)
       .then(() =>
-        toast({ title: "All logs copied", description: `${activityLog.length} entries copied` }),
+        toast({ title: "All logs copied", description: `${filteredLog.length} entries copied` }),
       );
   };
 
@@ -73,7 +117,7 @@ export function ActivityLogPanel() {
   };
 
   const copySelected = () => {
-    const selected = activityLog.filter((e) => selectedIds.has(e.id));
+    const selected = filteredLog.filter((e) => selectedIds.has(e.id));
     const text = selected.map(formatEntry).join("\n\n");
     navigator.clipboard
       .writeText(text)
@@ -89,6 +133,7 @@ export function ActivityLogPanel() {
     toast({ title: "Logs deleted", description: `${selectedIds.size} entries removed` });
   };
 
+  // ─── RENDER ──────────────────────────────────────────────────────────
   return (
     <>
       {!open && (
@@ -119,7 +164,7 @@ export function ActivityLogPanel() {
               <div className="flex items-center gap-2">
                 <Activity className="h-4 w-4 text-primary" />
                 <h3 className="font-display text-sm font-medium">Activity log</h3>
-                <Badge className="text-[10px]">{activityLog.length}</Badge>
+                <Badge className="text-[10px]">{filteredLog.length}{typeFilter !== "all" ? `/${activityLog.length}` : ""}</Badge>
                 {selectMode && selectedIds.size > 0 && (
                   <Badge className="text-[10px] bg-primary text-primary-foreground">
                     {selectedIds.size} selected
@@ -172,7 +217,7 @@ export function ActivityLogPanel() {
                       size="sm"
                       onClick={() => setSelectMode(true)}
                       className="h-8 gap-1.5 text-xs"
-                      disabled={activityLog.length === 0}
+                      disabled={filteredLog.length === 0}
                     >
                       <CheckSquare className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Select</span>
                     </Button>
@@ -181,7 +226,7 @@ export function ActivityLogPanel() {
                       size="sm"
                       onClick={copyAllLogs}
                       className="h-8 gap-1.5 text-xs"
-                      disabled={activityLog.length === 0}
+                      disabled={filteredLog.length === 0}
                     >
                       <Copy className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Copy all</span>
                     </Button>
@@ -196,14 +241,45 @@ export function ActivityLogPanel() {
               </div>
             </div>
 
+            {/* Type filter row — dropdown to filter entries by their category. */}
+            <div className="px-3 sm:px-4 py-2 border-b border-border/60 bg-muted/30 flex items-center gap-2">
+              <Filter className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <label className="text-[10px] uppercase tracking-wider text-muted-foreground shrink-0">
+                Type
+              </label>
+              <select
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value as ActivityLogEntry["category"] | "all")}
+                className="flex-1 h-8 px-2 rounded-md border border-border bg-background text-xs"
+              >
+                {CATEGORY_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              {typeFilter !== "all" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setTypeFilter("all")}
+                  className="h-7 text-[10px] text-muted-foreground"
+                >
+                  Clear
+                </Button>
+              )}
+            </div>
+
             <ScrollArea className="h-[50vh] lg:h-[400px]">
               <div className="p-3 space-y-1.5">
-                {activityLog.length === 0 ? (
+                {filteredLog.length === 0 ? (
                   <div className="text-center py-12 text-xs text-muted-foreground">
-                    No activity logged yet.
+                    {typeFilter !== "all"
+                      ? `No ${typeFilter} entries logged yet.`
+                      : "No activity logged yet."}
                   </div>
                 ) : (
-                  activityLog.map((entry) => (
+                  filteredLog.map((entry) => (
                     <LogRow
                       key={entry.id}
                       entry={entry}
@@ -286,8 +362,7 @@ function LogRow({
               {entry.detail}
             </p>
           )}
-          {/* Actionable tip — explains HOW to fix the issue. Shown as a
-              highlighted callout so the user isn't left guessing. */}
+          {/* Actionable tip — explains HOW to fix the issue. */}
           {entry.tip && (
             <div className="mt-1.5 rounded-lg bg-accent/10 border border-accent/20 px-2 py-1.5 flex items-start gap-1.5">
               <Lightbulb className="h-3 w-3 text-accent shrink-0 mt-0.5" />

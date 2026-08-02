@@ -191,7 +191,26 @@ export interface ThemeSettings {
   baseFontSize: string;
 }
 
+/**
+ * PriceRangeSettings — controls the bounds of the price filter shown in the
+ * FiltersModal. Driven by the Settings page so the boutique manager can
+ * narrow or widen the shopping range without touching code.
+ *
+ * Defaults: min = 0, max = 10000 (both rounded to whole numbers).
+ */
+export interface PriceRangeSettings {
+  /** Lower bound of the price slider in the FiltersModal. */
+  min: number;
+  /** Upper bound of the price slider in the FiltersModal. */
+  max: number;
+}
+
 export interface TryOnSettings {
+  /**
+   * Price range bounds surfaced in the FiltersModal. Edited from the
+   * Settings page (Feature settings section). Defaults to { min: 0, max: 10000 }.
+   */
+  priceRange: PriceRangeSettings;
   /**
    * Model used for STAGE 1 — person detection (how many people are in the
    * frame). Selectable independently from the posture model.
@@ -298,4 +317,10 @@ export const EMPTY_FILTERS: ProductFilters = {
   priceMax: null,
   inStockOnly: false,
   newArrivalsOnly: false,
+};
+
+/** Default price-range bounds surfaced in Settings + FiltersModal. */
+export const DEFAULT_PRICE_RANGE: PriceRangeSettings = {
+  min: 0,
+  max: 10000,
 };

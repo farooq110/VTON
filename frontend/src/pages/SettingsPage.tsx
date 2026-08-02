@@ -1,9 +1,9 @@
-import { AlertCircle, CheckCircle2, Download, Loader2, Palette, RotateCcw, Save, Scan, Shield, Target, Trash2, Image as ImageIcon, HardDrive } from "lucide-react";
+import { AlertCircle, CheckCircle2, Download, Loader2, Palette, RotateCcw, Save, Scan, Shield, Target, Trash2, Image as ImageIcon, HardDrive, DollarSign } from "lucide-react";
 import { useRef, useState } from "react";
 import { useAuthStore } from "@/lib/store";
 import { DETECTION_MODELS } from "@/lib/constants";
-import { canManageBrand, canManageFeatures, ROLE_LABELS } from "@/types";
-import type { DetectionModel, DetectionModelId, ImageCompressionSettings, PersonDetectionParams, PoseThresholds, TryOnSettings } from "@/types";
+import { canManageBrand, canManageFeatures, ROLE_LABELS, DEFAULT_PRICE_RANGE } from "@/types";
+import type { DetectionModel, DetectionModelId, ImageCompressionSettings, PersonDetectionParams, PoseThresholds, PriceRangeSettings, TryOnSettings } from "@/types";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { logger } from "@/lib/logger";
 import { useToast } from "@/components/ui/toast";
@@ -78,6 +78,17 @@ export function SettingsPage() {
     handleUpdate({ compression: { ...settings.compression, ...patch } });
   const setPersonParams = (patch: Partial<PersonDetectionParams>) =>
     handleUpdate({ personDetectionParams: { ...settings.personDetectionParams, ...patch } });
+  // Price range — drives the min/max bounds of the FiltersModal slider.
+  // Always coerced to rounded, non-negative integers, and max >= min so
+  // the slider can never render with an invalid range.
+  const setPriceRange = (patch: Partial<PriceRangeSettings>) => {
+    const next: PriceRangeSettings = {
+      min: Math.max(0, Math.round(patch.min ?? settings.priceRange.min)),
+      max: Math.max(0, Math.round(patch.max ?? settings.priceRange.max)),
+    };
+    if (next.max < next.min) next.max = next.min;
+    handleUpdate({ priceRange: next });
+  };
 
   const roleLabel = userRole ? ROLE_LABELS[userRole] : "";
   const subtitle = canBrand && canFeatures
@@ -321,6 +332,51 @@ export function SettingsPage() {
               </div>
               <NumberField label="Capture timer (s)" value={settings.captureTimerSeconds} step={1} min={1} max={10} onChange={(v) => handleUpdate({ captureTimerSeconds: v })} />
               <NumberField label="Tagline refresh (s)" value={settings.taglineRefreshMs / 1000} step={0.5} min={1} max={8} onChange={(v) => handleUpdate({ taglineRefreshMs: v * 1000 })} />
+            </section>
+          )}
+
+          {/* ─── PRICE RANGE BOUNDS ──────────────────────────────────────
+              Controls the min/max bounds of the price slider in the
+              FiltersModal. Defaults to { min: 0, max: 10000 } (rounded).
+              The boutique manager can narrow or widen this range to match
+              the catalogue's actual price distribution. Values are always
+              coerced to non-negative integers, and max is clamped to be
+              >= min so the slider can never render with an invalid range. */}
+          {canFeatures && (
+            <section className="rounded-2xl bg-card border border-border p-6 space-y-5">
+              <div className="flex items-center gap-2">
+                <DollarSign className="h-5 w-5 text-accent" />
+                <div>
+                  <h2 className="font-display text-lg">Price range bounds</h2>
+                  <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
+                    Controls the min/max bounds of the price slider shown in the product Filters modal. Defaults to <strong>$0 – $10,000</strong> (rounded). Adjust to match your catalogue&apos;s actual price distribution. The FiltersModal slider always uses these bounds — customers can pick any value inside them.
+                  </p>
+                </div>
+              </div>
+              <NumberField
+                label="Min price ($)"
+                value={settings.priceRange.min}
+                step={1}
+                min={0}
+                max={settings.priceRange.max}
+                onChange={(v) => setPriceRange({ min: v })}
+              />
+              <NumberField
+                label="Max price ($)"
+                value={settings.priceRange.max}
+                step={1}
+                min={settings.priceRange.min}
+                max={1_000_000}
+                onChange={(v) => setPriceRange({ max: v })}
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setPriceRange({ ...DEFAULT_PRICE_RANGE })}
+                className="gap-1.5 h-8 text-xs"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> Reset to defaults ($0 – $10,000)
+              </Button>
             </section>
           )}
 
