@@ -1,9 +1,9 @@
 import { AlertCircle, CheckCircle2, Download, Loader2, Palette, RotateCcw, Save, Scan, Shield, Target, Trash2, Image as ImageIcon, HardDrive, DollarSign } from "lucide-react";
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAuthStore } from "@/lib/store";
-import { DETECTION_MODELS } from "@/lib/constants";
+import { DETECTION_MODELS, DEFAULT_SETTINGS } from "@/lib/constants";
 import { canManageBrand, canManageFeatures, ROLE_LABELS, DEFAULT_PRICE_RANGE } from "@/types";
-import type { DetectionModel, DetectionModelId, ImageCompressionSettings, PersonDetectionParams, PoseThresholds, PriceRangeSettings, TryOnSettings } from "@/types";
+import type { DetectionModel, DetectionModelId, ImageCompressionSettings, PersonDetectionParams, PoseThresholds, PriceRangeSettings, TryOnSettings, Brand } from "@/types";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { logger } from "@/lib/logger";
 import { useToast } from "@/components/ui/toast";
@@ -12,83 +12,168 @@ import { BrandSection } from "@/components/settings/BrandSection";
 import { ThemeSection } from "@/components/settings/ThemeSection";
 import { Button } from "@/components/ui/button";
 import { Accordion, AccordionItem } from "@/components/ui/accordion";
+import apiClient from "@/lib/api-client";
 
 /**
  * SettingsPage — control panel for brand identity, detection models, posture
  * thresholds, image compression, capture timer, and debug/telemetry.
  *
- * ─── NEW MODEL ARCHITECTURE ─────────────────────────────────────────────
- * The settings page now has THREE separate model-related sections:
+ * ─── DRAFT / COMMIT PATTERN (Issues 2, 3, 4) ───────────────────────────
+ * All settings changes go into a LOCAL DRAFT state (`draftSettings` +
+ * `draftBrand`). The draft is only committed to the global store (which
+ * triggers ThemeApplier + BrandLogo re-renders) when the user clicks the
+ * header "Save" button. This means:
  *
- *   1. MODEL DOWNLOADS (top, shared) — lists every available model with a
- *      Download / Uninstall button. Downloading a model here makes it
- *      available for BOTH person detection AND posture estimation. The
- *      download state is PERSISTENT (survives page refresh) via the
- *      model-persistence layer.
+ *   - Selecting a theme preset marks the settings as dirty (Save button
+ *     activates) but does NOT apply the theme immediately.
+ *   - The theme is only applied when the user clicks Save → the draft is
+ *     committed to the store → ThemeApplier picks up the change.
+ *   - Save also POSTs the settings + brand to the server.
+ *   - On app load, settings are fetched from the server (see App.tsx).
  *
- *   2. PERSON DETECTION MODEL (Stage 1) — select which downloaded model to
- *      use for person detection, plus its own tuning parameters
- *      (confidence threshold, NMS IoU, max persons). Click anywhere on a
- *      model's card to select it.
- *
- *   3. POSTURE ESTIMATION MODEL (Stage 3) — select which downloaded model
- *      to use for posture checks, plus the pose thresholds (shoulder tilt,
- *      face yaw, etc.). Click anywhere on a model's card to select it.
- *
- * Both selection sections draw from the SAME list of models, and both can
- * pick the same or different models. The download is shared.
+ * Reset: applies defaults immediately (commits to store + sends to server)
+ * AND clears any uploaded images (customLogoUrl, customCoverBannerUrl).
  */
 export function SettingsPage() {
-  const { settings, updateSettings, resetSettings, user } = useAuthStore();
+  const { settings, updateSettings, resetSettings, user, brand } = useAuthStore();
   const userRole = user?.role;
   const { toast } = useToast();
 
   const canBrand = canManageBrand(userRole);
   const canFeatures = canManageFeatures(userRole);
 
-  const savedSnapshotRef = useRef<TryOnSettings>(structuredClone(settings));
-  const [saved, setSaved] = useState(true);
+  // ─── DRAFT STATE ──────────────────────────────────────────────────────
+  // The draft holds pending changes that haven't been committed to the
+  // store yet. The user edits the draft; the header Save button commits
+  // it. This prevents theme/brand changes from applying immediately.
+  const [draftSettings, setDraftSettings] = useState<TryOnSettings>(settings);
+  const [draftBrand, setDraftBrand] = useState<Brand>(brand);
 
-  const isDirty = () => JSON.stringify(settings) !== JSON.stringify(savedSnapshotRef.current);
+  // Sync the draft from the store when the store changes externally (e.g.
+  // after a server fetch on app load). This runs on mount + whenever the
+  // store's settings/brand change identity (but NOT when we ourselves
+  // commit — because committing updates the store, which would re-sync
+  // the draft to the just-committed value, which is correct).
+  useEffect(() => {
+    setDraftSettings(settings);
+  }, [settings]);
+  useEffect(() => {
+    setDraftBrand(brand);
+  }, [brand]);
 
-  const handleUpdate = (patch: Partial<TryOnSettings>) => {
-    updateSettings(patch);
-    setSaved(false);
-    logger.interaction(`Setting changed: ${Object.keys(patch).join(", ")}`, {
+  const isDirty = () =>
+    JSON.stringify(draftSettings) !== JSON.stringify(settings) ||
+    JSON.stringify(draftBrand) !== JSON.stringify(brand);
+
+  // ─── DRAFT UPDATERS ───────────────────────────────────────────────────
+  // These update the DRAFT (not the store). The ThemeApplier doesn't see
+  // these changes until the user clicks Save.
+  const patchDraftSettings = useCallback((patch: Partial<TryOnSettings>) => {
+    setDraftSettings((prev) => ({ ...prev, ...patch }));
+    logger.interaction(`Draft setting changed: ${Object.keys(patch).join(", ")}`, {
       component: "SettingsPage",
       detail: JSON.stringify(patch).slice(0, 120),
     });
+  }, []);
+
+  const patchDraftBrand = useCallback((patch: Partial<Brand>) => {
+    setDraftBrand((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  // ─── SAVE (commit draft → store → server) ─────────────────────────────
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      // 1. Commit the draft to the store — this triggers ThemeApplier +
+      //    BrandLogo to re-render with the new values.
+      updateSettings(draftSettings);
+      // Update brand fields individually so the store's brand setters fire.
+      const state = useAuthStore.getState();
+      if (draftBrand.customName !== state.brand.customName) {
+        state.setBrandName(draftBrand.customName ?? null);
+      }
+      if (draftBrand.customLogoUrl !== state.brand.customLogoUrl) {
+        state.setBrandLogo(draftBrand.customLogoUrl ?? null);
+      }
+      if (draftBrand.customCoverBannerUrl !== state.brand.customCoverBannerUrl) {
+        state.setBrandCoverImage(draftBrand.customCoverBannerUrl ?? null);
+      }
+
+      // 2. POST to the server (fire-and-forget — best-effort).
+      await Promise.allSettled([
+        apiClient.put("/settings", draftSettings),
+        apiClient.put("/brand", draftBrand),
+      ]);
+
+      logger.settings("Settings saved to server");
+      toast({ title: "Settings saved", description: "Your changes have been applied across the app and saved to the server." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to save settings.";
+      logger.settings("Settings save failed", { detail: msg, level: "error" });
+      toast({ title: "Save failed", description: msg, variant: "destructive" });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleReset = () => {
+  // ─── RESET (apply defaults immediately + clear uploads from server) ───
+  const [isResetting, setIsResetting] = useState(false);
+
+  const handleReset = async () => {
+    setIsResetting(true);
     logger.interaction("Reset settings clicked", { component: "SettingsPage" });
-    resetSettings();
-    setTimeout(() => setSaved(false), 0);
+    try {
+      // 1. Apply defaults to the DRAFT immediately.
+      const defaultSettings = structuredClone(DEFAULT_SETTINGS);
+      const defaultBrand: Brand = {
+        ...brand,
+        customName: undefined,
+        customLogoUrl: undefined,
+        customCoverBannerUrl: undefined,
+      };
+      setDraftSettings(defaultSettings);
+      setDraftBrand(defaultBrand);
+
+      // 2. Commit to the store immediately (so the UI reflects defaults).
+      resetSettings();
+      const state = useAuthStore.getState();
+      state.setBrandName(null);
+      state.setBrandLogo(null);
+      state.setBrandCoverImage(null);
+
+      // 3. DELETE uploaded images from the server + persist defaults.
+      await Promise.allSettled([
+        apiClient.put("/settings", defaultSettings),
+        apiClient.put("/brand", defaultBrand),
+        apiClient.delete("/brand/logo"),
+        apiClient.delete("/brand/cover"),
+      ]);
+
+      toast({ title: "Settings reset", description: "All settings reverted to defaults. Uploaded images removed." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to reset settings.";
+      toast({ title: "Reset failed", description: msg, variant: "destructive" });
+    } finally {
+      setIsResetting(false);
+    }
   };
 
-  const handleSave = () => {
-    savedSnapshotRef.current = structuredClone(useAuthStore.getState().settings);
-    setSaved(true);
-    logger.settings("Settings saved");
-    toast({ title: "Settings saved", description: "Your changes have been applied." });
-  };
-
+  // ─── Convenience setters for the draft ────────────────────────────────
   const setThresholds = (patch: Partial<PoseThresholds>) =>
-    handleUpdate({ poseThresholds: { ...settings.poseThresholds, ...patch } });
+    patchDraftSettings({ poseThresholds: { ...draftSettings.poseThresholds, ...patch } });
   const setCompression = (patch: Partial<ImageCompressionSettings>) =>
-    handleUpdate({ compression: { ...settings.compression, ...patch } });
+    patchDraftSettings({ compression: { ...draftSettings.compression, ...patch } });
   const setPersonParams = (patch: Partial<PersonDetectionParams>) =>
-    handleUpdate({ personDetectionParams: { ...settings.personDetectionParams, ...patch } });
-  // Price range — drives the min/max bounds of the FiltersModal slider.
-  // Always coerced to rounded, non-negative integers, and max >= min so
-  // the slider can never render with an invalid range.
+    patchDraftSettings({ personDetectionParams: { ...draftSettings.personDetectionParams, ...patch } });
   const setPriceRange = (patch: Partial<PriceRangeSettings>) => {
     const next: PriceRangeSettings = {
-      min: Math.max(0, Math.round(patch.min ?? settings.priceRange.min)),
-      max: Math.max(0, Math.round(patch.max ?? settings.priceRange.max)),
+      min: Math.max(0, Math.round(patch.min ?? draftSettings.priceRange.min)),
+      max: Math.max(0, Math.round(patch.max ?? draftSettings.priceRange.max)),
     };
     if (next.max < next.min) next.max = next.min;
-    handleUpdate({ priceRange: next });
+    patchDraftSettings({ priceRange: next });
   };
 
   const roleLabel = userRole ? ROLE_LABELS[userRole] : "";
@@ -100,7 +185,7 @@ export function SettingsPage() {
         ? `Feature settings · ${roleLabel}`
         : "View only";
 
-  const dirty = !saved && isDirty();
+  const dirty = isDirty();
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -111,28 +196,25 @@ export function SettingsPage() {
         rightSlot={
           <>
             {canFeatures && (
-              <Button variant="outline" size="sm" onClick={handleReset} className="gap-2">
-                <RotateCcw className="h-4 w-4" /> Reset
+              <Button variant="outline" size="sm" onClick={handleReset} disabled={isResetting || isSaving} className="gap-2">
+                {isResetting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                {isResetting ? "Resetting…" : "Reset"}
               </Button>
             )}
             <Button
               size="sm"
               onClick={handleSave}
-              disabled={!dirty}
+              disabled={!dirty || isSaving}
               className="gap-2"
             >
-              <Save className="h-4 w-4" /> {dirty ? "Save" : "Saved"}
+              {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {isSaving ? "Saving…" : dirty ? "Save" : "Saved"}
             </Button>
           </>
         }
       />
 
       <main className="flex-1 px-3 sm:px-6 lg:px-10 py-6 max-w-4xl mx-auto w-full">
-        {/* Issue 7 fix — all heavy-content sections are now wrapped in an
-            Accordion so the user can collapse sections they're not
-            interested in. The first section (Brand identity) defaults to
-            open; the rest default to collapsed so the page doesn't feel
-            like an endless scroll. */}
         <Accordion>
           {/* Brand identity — manager-only */}
           {canBrand && (
@@ -142,7 +224,13 @@ export function SettingsPage() {
               icon={<ImageIcon className="h-5 w-5" />}
               defaultOpen
             >
-              <BrandSection />
+              {/* Issue 1 fix — BrandSection now receives the DRAFT brand +
+                  a patchDraftBrand callback. It no longer has its own Save
+                  button; the header Save button handles persistence. */}
+              <BrandSection
+                draftBrand={draftBrand}
+                patchDraftBrand={patchDraftBrand}
+              />
             </AccordionItem>
           )}
 
@@ -150,10 +238,18 @@ export function SettingsPage() {
           {canBrand && (
             <AccordionItem
               title="Theme"
-              description="Pick a colour scheme, font, and base text size. Changes apply instantly."
+              description="Pick a colour scheme, font, and base text size. Changes apply on Save."
               icon={<Palette className="h-5 w-5" />}
             >
-              <ThemeSection />
+              {/* Issue 2 fix — ThemeSection now receives the DRAFT theme +
+                  a patchDraftTheme callback. Theme changes update the draft
+                  (not the store), so they DON'T apply immediately. The
+                  header Save button commits the draft → ThemeApplier picks
+                  it up → the theme changes. */}
+              <ThemeSection
+                draftTheme={draftSettings.theme}
+                patchDraftTheme={(partial) => patchDraftSettings({ theme: { ...draftSettings.theme, ...partial } })}
+              />
             </AccordionItem>
           )}
 
@@ -184,9 +280,9 @@ export function SettingsPage() {
                   <SelectableModelCard
                     key={m.id}
                     model={m}
-                    isActive={settings.personDetectionModelId === m.id}
+                    isActive={draftSettings.personDetectionModelId === m.id}
                     onSelect={() => {
-                      handleUpdate({ personDetectionModelId: m.id as DetectionModelId });
+                      patchDraftSettings({ personDetectionModelId: m.id as DetectionModelId });
                       logger.interaction(`Person-detection model selected: ${m.name}`, {
                         component: "PersonDetectionSection",
                       });
@@ -194,36 +290,13 @@ export function SettingsPage() {
                   />
                 ))}
               </div>
-
-              {/* Person-detection-specific parameters */}
               <div className="rounded-lg border border-border/60 bg-muted/30 p-4 space-y-3">
                 <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                   Person detection parameters
                 </p>
-                <NumberField
-                  label="Confidence threshold (0–1)"
-                  value={settings.personDetectionParams.confidenceThreshold}
-                  step={0.05}
-                  min={0.3}
-                  max={0.95}
-                  onChange={(v) => setPersonParams({ confidenceThreshold: v })}
-                />
-                <NumberField
-                  label="NMS IoU threshold (0–1)"
-                  value={settings.personDetectionParams.nmsIouThreshold}
-                  step={0.05}
-                  min={0.1}
-                  max={0.9}
-                  onChange={(v) => setPersonParams({ nmsIouThreshold: v })}
-                />
-                <NumberField
-                  label="Max persons returned"
-                  value={settings.personDetectionParams.maxPersons}
-                  step={1}
-                  min={1}
-                  max={50}
-                  onChange={(v) => setPersonParams({ maxPersons: v })}
-                />
+                <NumberField label="Confidence threshold (0–1)" value={draftSettings.personDetectionParams.confidenceThreshold} step={0.05} min={0.3} max={0.95} onChange={(v) => setPersonParams({ confidenceThreshold: v })} />
+                <NumberField label="NMS IoU threshold (0–1)" value={draftSettings.personDetectionParams.nmsIouThreshold} step={0.05} min={0.1} max={0.9} onChange={(v) => setPersonParams({ nmsIouThreshold: v })} />
+                <NumberField label="Max persons returned" value={draftSettings.personDetectionParams.maxPersons} step={1} min={1} max={50} onChange={(v) => setPersonParams({ maxPersons: v })} />
               </div>
             </AccordionItem>
           )}
@@ -240,9 +313,9 @@ export function SettingsPage() {
                   <SelectableModelCard
                     key={m.id}
                     model={m}
-                    isActive={settings.postureModelId === m.id}
+                    isActive={draftSettings.postureModelId === m.id}
                     onSelect={() => {
-                      handleUpdate({ postureModelId: m.id as DetectionModelId });
+                      patchDraftSettings({ postureModelId: m.id as DetectionModelId });
                       logger.interaction(`Posture model selected: ${m.name}`, {
                         component: "PostureSection",
                       });
@@ -250,16 +323,14 @@ export function SettingsPage() {
                   />
                 ))}
               </div>
-
-              {/* Posture thresholds */}
               <div className="rounded-lg border border-border/60 bg-muted/30 p-4 space-y-3">
                 <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                   Posture thresholds
                 </p>
-                <NumberField label="Shoulder tilt (deg)" value={settings.poseThresholds.shoulderTiltDeg} step={1} min={0} max={30} onChange={(v) => setThresholds({ shoulderTiltDeg: v })} />
-                <NumberField label="Face yaw (deg)" value={settings.poseThresholds.faceYawDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ faceYawDeg: v })} />
-                <NumberField label="Face pitch (deg)" value={settings.poseThresholds.facePitchDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ facePitchDeg: v })} />
-                <NumberField label="Body visibility (0–1)" value={settings.poseThresholds.minBodyVisibility} step={0.05} min={0.3} max={0.95} onChange={(v) => setThresholds({ minBodyVisibility: v })} />
+                <NumberField label="Shoulder tilt (deg)" value={draftSettings.poseThresholds.shoulderTiltDeg} step={1} min={0} max={30} onChange={(v) => setThresholds({ shoulderTiltDeg: v })} />
+                <NumberField label="Face yaw (deg)" value={draftSettings.poseThresholds.faceYawDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ faceYawDeg: v })} />
+                <NumberField label="Face pitch (deg)" value={draftSettings.poseThresholds.facePitchDeg} step={1} min={0} max={35} onChange={(v) => setThresholds({ facePitchDeg: v })} />
+                <NumberField label="Body visibility (0–1)" value={draftSettings.poseThresholds.minBodyVisibility} step={0.05} min={0.3} max={0.95} onChange={(v) => setThresholds({ minBodyVisibility: v })} />
               </div>
             </AccordionItem>
           )}
@@ -271,17 +342,17 @@ export function SettingsPage() {
               description="Compress captured photos before sending to the AI. Smaller files upload faster."
               icon={<ImageIcon className="h-5 w-5" />}
             >
-              <NumberField label="Max file size (KB)" value={settings.compression.maxFileSizeKb} step={100} min={100} max={5000} onChange={(v) => setCompression({ maxFileSizeKb: v })} />
-              <NumberField label="Min quality (0–1)" value={settings.compression.minQuality} step={0.05} min={0.3} max={0.95} onChange={(v) => setCompression({ minQuality: v })} />
-              <NumberField label="Quality step" value={settings.compression.qualityStep} step={0.01} min={0.01} max={0.2} onChange={(v) => setCompression({ qualityStep: v })} />
-              <NumberField label="Dimension step" value={settings.compression.dimensionStep} step={0.01} min={0.01} max={0.2} onChange={(v) => setCompression({ dimensionStep: v })} />
+              <NumberField label="Max file size (KB)" value={draftSettings.compression.maxFileSizeKb} step={100} min={100} max={5000} onChange={(v) => setCompression({ maxFileSizeKb: v })} />
+              <NumberField label="Min quality (0–1)" value={draftSettings.compression.minQuality} step={0.05} min={0.3} max={0.95} onChange={(v) => setCompression({ minQuality: v })} />
+              <NumberField label="Quality step" value={draftSettings.compression.qualityStep} step={0.01} min={0.01} max={0.2} onChange={(v) => setCompression({ qualityStep: v })} />
+              <NumberField label="Dimension step" value={draftSettings.compression.dimensionStep} step={0.01} min={0.01} max={0.2} onChange={(v) => setCompression({ dimensionStep: v })} />
               <label className="flex items-center justify-between">
                 <span className="text-sm">Strip EXIF metadata</span>
-                <input type="checkbox" checked={settings.compression.stripMetadata} onChange={(e) => setCompression({ stripMetadata: e.target.checked })} />
+                <input type="checkbox" checked={draftSettings.compression.stripMetadata} onChange={(e) => setCompression({ stripMetadata: e.target.checked })} />
               </label>
               <label className="flex items-center justify-between">
                 <span className="text-sm">Strip PNG/EXIF chunks</span>
-                <input type="checkbox" checked={settings.compression.stripChunks} onChange={(e) => setCompression({ stripChunks: e.target.checked })} />
+                <input type="checkbox" checked={draftSettings.compression.stripChunks} onChange={(e) => setCompression({ stripChunks: e.target.checked })} />
               </label>
             </AccordionItem>
           )}
@@ -293,8 +364,29 @@ export function SettingsPage() {
               description="Set the countdown timer before the camera captures + tagline rotation speed."
               icon={<Scan className="h-5 w-5" />}
             >
-              <NumberField label="Capture timer (s)" value={settings.captureTimerSeconds} step={1} min={1} max={10} onChange={(v) => handleUpdate({ captureTimerSeconds: v })} />
-              <NumberField label="Tagline refresh (s)" value={settings.taglineRefreshMs / 1000} step={0.5} min={1} max={8} onChange={(v) => handleUpdate({ taglineRefreshMs: v * 1000 })} />
+              <NumberField label="Capture timer (s)" value={draftSettings.captureTimerSeconds} step={1} min={1} max={10} onChange={(v) => patchDraftSettings({ captureTimerSeconds: v })} />
+              <NumberField label="Tagline refresh (s)" value={draftSettings.taglineRefreshMs / 1000} step={0.5} min={1} max={8} onChange={(v) => patchDraftSettings({ taglineRefreshMs: v * 1000 })} />
+            </AccordionItem>
+          )}
+
+          {/* ─── CURRENCY ──────────────────────────────────────────────── */}
+          {canFeatures && (
+            <AccordionItem
+              title="Currency"
+              description="Dynamic currency code (ISO 4217) for all price displays. Defaults to PKR."
+              icon={<DollarSign className="h-5 w-5" />}
+            >
+              <div>
+                <label className="text-xs uppercase tracking-wider text-muted-foreground">Currency code</label>
+                <input
+                  type="text"
+                  value={draftSettings.currency}
+                  onChange={(e) => patchDraftSettings({ currency: e.target.value.toUpperCase().slice(0, 3) })}
+                  placeholder="PKR"
+                  className="w-full h-10 mt-1 px-3 rounded-lg border border-border font-mono uppercase"
+                  maxLength={3}
+                />
+              </div>
             </AccordionItem>
           )}
 
@@ -307,17 +399,17 @@ export function SettingsPage() {
             >
               <NumberField
                 label="Min price ($)"
-                value={settings.priceRange.min}
+                value={draftSettings.priceRange.min}
                 step={1}
                 min={0}
-                max={settings.priceRange.max}
+                max={draftSettings.priceRange.max}
                 onChange={(v) => setPriceRange({ min: v })}
               />
               <NumberField
                 label="Max price ($)"
-                value={settings.priceRange.max}
+                value={draftSettings.priceRange.max}
                 step={1}
-                min={settings.priceRange.min}
+                min={draftSettings.priceRange.min}
                 max={1_000_000}
                 onChange={(v) => setPriceRange({ max: v })}
               />
@@ -344,20 +436,20 @@ export function SettingsPage() {
                   <span className="text-sm font-medium">Enable debug logging</span>
                   <p className="text-xs text-muted-foreground mt-0.5">Shows the Activity overlay (bottom-right). Logs navigation, interactions, camera, capture, try-on, and network events.</p>
                 </div>
-                <input type="checkbox" checked={settings.debugLogging} onChange={(e) => handleUpdate({ debugLogging: e.target.checked })} />
+                <input type="checkbox" checked={draftSettings.debugLogging} onChange={(e) => patchDraftSettings({ debugLogging: e.target.checked })} />
               </label>
               <label className="flex items-center justify-between">
                 <div>
                   <span className="text-sm font-medium">Send error telemetry to backend</span>
                   <p className="text-xs text-muted-foreground mt-0.5">When ON, error-level logs (with fix tips) are POSTed to <code className="font-mono text-[10px]">/api/telemetry</code> (fire-and-forget).</p>
                 </div>
-                <input type="checkbox" checked={settings.telemetryEnabled} onChange={(e) => handleUpdate({ telemetryEnabled: e.target.checked })} />
+                <input type="checkbox" checked={draftSettings.telemetryEnabled} onChange={(e) => patchDraftSettings({ telemetryEnabled: e.target.checked })} />
               </label>
             </AccordionItem>
           )}
         </Accordion>
 
-        {/* Locked messages — kept OUTSIDE the accordion (always visible). */}
+        {/* Locked messages */}
         {!canFeatures && canBrand && (
           <div className="mt-4 rounded-2xl border border-dashed border-border/60 bg-muted/30 p-6 text-center">
             <Shield className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
@@ -408,13 +500,6 @@ function NumberField({ label, value, step, min, max, onChange }: { label: string
 
 /**
  * ModelDownloadRow — a single model in the shared "Model downloads" section.
- *
- * Shows the model name, size, and a Download / Uninstall button. The
- * download state is read from the persistence layer (survives page refresh).
- * Uninstall removes the model from the browser's Cache Storage.
- *
- * This row does NOT select the model for any stage — it only manages the
- * download. Selection happens in the SelectableModelCard components below.
  */
 function ModelDownloadRow({ model }: { model: DetectionModel }) {
   const { isModelCached, preloadModel, uninstallModel, modelStatus, modelProgress, activeModelId } = usePoseDetection();
@@ -507,15 +592,6 @@ function ModelDownloadRow({ model }: { model: DetectionModel }) {
 /**
  * SelectableModelCard — a model card used in the person-detection and
  * posture-estimation selection sections.
- *
- * CLICK-ANYWHERE-TO-SELECT: the entire card is a button that calls onSelect.
- * There's no separate radio button to click — the whole card is the target.
- * The visual radio indicator on the right is just a status display, not an
- * interactive element.
- *
- * Shows a "Download first" hint if the model isn't downloaded yet, but
- * still allows selection (the download will happen automatically on first
- * use, or the user can download it from the "Model downloads" section above).
  */
 function SelectableModelCard({
   model,
@@ -560,8 +636,6 @@ function SelectableModelCard({
           <p className="text-xs text-muted-foreground mt-1">{model.description}</p>
           <p className="text-[11px] text-muted-foreground mt-2 font-mono">~{model.speedMs}ms · {model.accuracy} · {model.sizeMb} MB</p>
         </div>
-        {/* Visual selection indicator — NOT interactive (the whole card is
-            the button). Just shows the selected/unselected state. */}
         <div
           className={`h-5 w-5 rounded-full border-2 shrink-0 mt-0.5 grid place-items-center transition ${
             isActive ? "border-primary bg-primary" : "border-border"

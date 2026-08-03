@@ -88,14 +88,16 @@ export function ProductCard({
         <div className="flex sm:flex-col">
           <div className="relative w-28 sm:w-auto aspect-[4/5] sm:aspect-[4/5] overflow-hidden bg-muted shrink-0 sm:shrink">
             {/* Issue 6 fix — graceful image loading with shimmer skeleton.
-                The ProductImage component shows a clean animated skeleton
-                placeholder until the image is fully loaded, then
-                cross-fades the real image in. No more uneven loading. */}
+                Issue 5 fix — pass wrapperClassName="absolute inset-0 h-full w-full"
+                so the wrapper fills the parent (which is `relative aspect-[4/5]`).
+                Without this, the wrapper had no explicit dimensions and could
+                collapse to 0×0 on first render, hiding the image. */}
             <ProductImage
               src={resolveProductImage(product)}
               alt={product.name}
+              wrapperClassName="absolute inset-0 h-full w-full"
+              className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
               onError={(e) => onImageError(e, product.sku)}
-              className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
             />
             {/* Caller-provided badge (e.g. trending rank) */}
             {badge && (

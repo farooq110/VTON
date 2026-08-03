@@ -16,25 +16,30 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useAuthStore } from "@/lib/store";
 import { useToast } from "@/components/ui/toast";
 import type { ThemeSettings } from "@/types";
 
 /**
  * ThemeSection — boutique-appearance customization panel.
  *
+ * Issue 2 fix — ThemeSection now receives `draftTheme` + `patchDraftTheme`
+ * as props instead of reading from the store directly. This means theme
+ * changes update the DRAFT (not the store), so they DON'T apply
+ * immediately. The parent SettingsPage commits the draft to the store
+ * (which triggers ThemeApplier) only when the user clicks the header
+ * Save button.
+ *
  * Surface for the `settings.theme` block: primary / accent / background
- * colors, font family, and base font size. Each change is written through
- * the store's `updateSettings({ theme })` action so the ThemeApplier (mounted
- * at the app root) immediately reflects the new variables on every screen.
+ * colors, font family, and base font size. Each change is written to the
+ * draft via `patchDraftTheme` so the parent can track dirty state.
  *
  * Includes:
  *   - 10 curated boutique color presets (one-tap full recolor)
  *   - 3 color pickers (primary / accent / background) with hex input
  *   - Font family select (serif / sans-serif / monospace)
  *   - 6 font size select (xs … 2xl)
- *   - Live preview block
- *   - Reset to defaults button
+ *   - Live preview block (reflects DRAFT, not the applied theme)
+ *   - Reset to defaults button (resets the DRAFT only, not the store)
  */
 interface ColorPreset {
   id: string;
@@ -78,44 +83,54 @@ const DEFAULT_THEME: ThemeSettings = {
   baseFontSize: "base",
 };
 
-export function ThemeSection() {
-  const theme = useAuthStore((s) => s.settings.theme);
-  const updateSettings = useAuthStore((s) => s.updateSettings);
+export interface ThemeSectionProps {
+  /** The DRAFT theme (pending changes, not yet committed to the store). */
+  draftTheme: ThemeSettings;
+  /** Update the DRAFT theme. Does NOT apply to the store until Save. */
+  patchDraftTheme: (partial: Partial<ThemeSettings>) => void;
+}
+
+export function ThemeSection({ draftTheme, patchDraftTheme }: ThemeSectionProps) {
   const { toast } = useToast();
 
   const patch = useCallback(
     (partial: Partial<ThemeSettings>) => {
-      updateSettings({ theme: { ...theme, ...partial } });
+      patchDraftTheme({ ...draftTheme, ...partial });
     },
-    [theme, updateSettings],
+    [draftTheme, patchDraftTheme],
   );
 
   const activePreset = useMemo(
     () =>
       COLOR_PRESETS.find(
         (p) =>
-          p.theme.primaryColor.toLowerCase() === theme.primaryColor.toLowerCase() &&
-          p.theme.accentColor.toLowerCase() === theme.accentColor.toLowerCase() &&
-          p.theme.backgroundColor.toLowerCase() === theme.backgroundColor.toLowerCase(),
+          p.theme.primaryColor.toLowerCase() === draftTheme.primaryColor.toLowerCase() &&
+          p.theme.accentColor.toLowerCase() === draftTheme.accentColor.toLowerCase() &&
+          p.theme.backgroundColor.toLowerCase() === draftTheme.backgroundColor.toLowerCase(),
       ),
-    [theme],
+    [draftTheme],
   );
 
   const isDefault =
-    theme.primaryColor === DEFAULT_THEME.primaryColor &&
-    theme.accentColor === DEFAULT_THEME.accentColor &&
-    theme.backgroundColor === DEFAULT_THEME.backgroundColor &&
-    theme.fontFamily === DEFAULT_THEME.fontFamily &&
-    theme.baseFontSize === DEFAULT_THEME.baseFontSize;
+    draftTheme.primaryColor === DEFAULT_THEME.primaryColor &&
+    draftTheme.accentColor === DEFAULT_THEME.accentColor &&
+    draftTheme.backgroundColor === DEFAULT_THEME.backgroundColor &&
+    draftTheme.fontFamily === DEFAULT_THEME.fontFamily &&
+    draftTheme.baseFontSize === DEFAULT_THEME.baseFontSize;
 
   const applyPreset = (preset: ColorPreset) => {
+    // Issue 2 fix — patch the DRAFT, don't call updateSettings. The theme
+    // is NOT applied immediately; it's only applied when the user clicks
+    // the header Save button (which commits the draft to the store).
     patch(preset.theme);
-    toast({ title: `${preset.name} theme applied` });
+    toast({ title: `${preset.name} selected`, description: "Click Save to apply." });
   };
 
   const handleReset = () => {
-    updateSettings({ theme: { ...DEFAULT_THEME } });
-    toast({ title: "Theme reset to defaults" });
+    // Issue 2 fix — reset the DRAFT only (not the store). The user still
+    // needs to click Save to commit the reset.
+    patchDraftTheme({ ...DEFAULT_THEME });
+    toast({ title: "Theme reset to defaults", description: "Click Save to apply." });
   };
 
   return (
@@ -125,18 +140,18 @@ export function ThemeSection() {
         <Label>Live preview</Label>
         <div
           className="relative w-full rounded-xl overflow-hidden border border-border/60"
-          style={{ backgroundColor: theme.backgroundColor }}
+          style={{ backgroundColor: draftTheme.backgroundColor }}
         >
           <div className="p-5 sm:p-6 flex flex-col gap-3">
             <div className="flex items-center gap-2">
-              <Palette className="h-4 w-4" style={{ color: theme.accentColor }} />
-              <span className="font-display text-sm uppercase tracking-widest" style={{ color: theme.primaryColor }}>
+              <Palette className="h-4 w-4" style={{ color: draftTheme.accentColor }} />
+              <span className="font-display text-sm uppercase tracking-widest" style={{ color: draftTheme.primaryColor }}>
                 Atelier Nova
               </span>
             </div>
             <h3
               className="font-display text-2xl sm:text-3xl"
-              style={{ color: theme.primaryColor, fontFamily: resolveFontFamily(theme.fontFamily) }}
+              style={{ color: draftTheme.primaryColor, fontFamily: resolveFontFamily(draftTheme.fontFamily) }}
             >
               Try then buy
             </h3>
@@ -148,14 +163,14 @@ export function ThemeSection() {
               <button
                 type="button"
                 className="h-9 px-4 rounded-xl text-sm font-medium"
-                style={{ backgroundColor: theme.primaryColor, color: "#fff" }}
+                style={{ backgroundColor: draftTheme.primaryColor, color: "#fff" }}
               >
                 Primary
               </button>
               <button
                 type="button"
                 className="h-9 px-4 rounded-xl text-sm font-medium"
-                style={{ backgroundColor: theme.accentColor, color: "#1a1a1a" }}
+                style={{ backgroundColor: draftTheme.accentColor, color: "#1a1a1a" }}
               >
                 Accent
               </button>
@@ -206,18 +221,18 @@ export function ThemeSection() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <ColorField
           label="Primary"
-          value={theme.primaryColor}
-          onChange={(v) => patch({ primaryColor: v })}
+          value={draftTheme.primaryColor}
+          onChange={(v) => patchDraftTheme({ primaryColor: v })}
         />
         <ColorField
           label="Accent"
-          value={theme.accentColor}
-          onChange={(v) => patch({ accentColor: v })}
+          value={draftTheme.accentColor}
+          onChange={(v) => patchDraftTheme({ accentColor: v })}
         />
         <ColorField
           label="Background"
-          value={theme.backgroundColor}
-          onChange={(v) => patch({ backgroundColor: v })}
+          value={draftTheme.backgroundColor}
+          onChange={(v) => patchDraftTheme({ backgroundColor: v })}
         />
       </div>
 
@@ -227,7 +242,7 @@ export function ThemeSection() {
           <Type className="h-3.5 w-3.5" /> Font family
         </Label>
         <Select
-          value={theme.fontFamily}
+          value={draftTheme.fontFamily}
           onValueChange={(v) => patch({ fontFamily: v })}
         >
           <SelectTrigger className="h-10">
@@ -247,7 +262,7 @@ export function ThemeSection() {
       <div className="space-y-2">
         <Label>Base font size</Label>
         <Select
-          value={theme.baseFontSize}
+          value={draftTheme.baseFontSize}
           onValueChange={(v) => patch({ baseFontSize: v })}
         >
           <SelectTrigger className="h-10">

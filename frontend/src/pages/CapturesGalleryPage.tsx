@@ -101,11 +101,12 @@ export function CapturesGalleryPage() {
   // garment — that's an info/warning situation, not an error.
   const tryWithImage = (img: SavedCaptureImage) => {
     if (!product) {
+      // Issue 4 fix — use variant: "warning" (amber) so the toast is
+      // clearly a friendly warning, not a red error.
       toast({
         title: "Please select a garment first",
         description: "Browse the collection and pick a garment to try on with this image.",
-        // No `variant: "destructive"` — this is a friendly warning, not an
-        // error. The default variant renders as a clean info toast.
+        variant: "warning",
       });
       return; // stay on the page — don't navigate to /products
     }

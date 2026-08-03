@@ -65,6 +65,8 @@ export const MODEL_REPO: Record<string, string> = {
 };
 
 export const DEFAULT_SETTINGS: TryOnSettings = {
+  /** Default currency is Pakistani Rupees (PKR). */
+  currency: "PKR",
   /** Price range bounds for the FiltersModal (editable from Settings). */
   priceRange: { ...DEFAULT_PRICE_RANGE },
   /** Stage 1 model — person detection. */
@@ -154,6 +156,11 @@ export function migrateSettings(persisted: Partial<TryOnSettings>): TryOnSetting
   };
   if (merged.priceRange.max < merged.priceRange.min) {
     merged.priceRange.max = merged.priceRange.min;
+  }
+  // Ensure currency is always present. Old persisted settings (pre currency
+  // feature) won't have this field — default to PKR.
+  if (!merged.currency || typeof merged.currency !== "string") {
+    merged.currency = defaults.currency;
   }
 
   return merged;

@@ -93,8 +93,9 @@ async function main(): Promise<void> {
 
   // --- Brand (storefront identity for the boutique frontend) -------------
   const existingBrand = await prisma.brand.findFirst({ where: { isActive: true } });
+  let brandId: string;
   if (!existingBrand) {
-    await prisma.brand.create({
+    const brand = await prisma.brand.create({
       data: {
         name: 'Atelier Nova',
         tagline: 'Try then Buy',
@@ -103,9 +104,65 @@ async function main(): Promise<void> {
         isActive: true,
       },
     });
+    brandId = brand.id;
     log('Brand seeded (Atelier Nova)');
   } else {
+    brandId = existingBrand.id;
     log('Brand already exists, skipping seed');
+  }
+
+  // --- Settings (app-wide settings for the active brand) -----------------
+  // Issue 3 fix — seed the Setting row with the UI's default values so
+  // GET /api/settings returns the correct defaults on first load (currency
+  // PKR, theme colors, model IDs, thresholds, compression, etc.).
+  const existingSettings = await prisma.setting.findUnique({
+    where: { brandId },
+  });
+  if (!existingSettings) {
+    await prisma.setting.create({
+      data: {
+        brandId,
+        currency: 'PKR',
+        priceRangeMin: 0,
+        priceRangeMax: 10000,
+        personDetectionModelId: 'yolov8n-pose',
+        postureModelId: 'yolov8n-pose',
+        poseThresholds: JSON.stringify({
+          personScore: 0.6,
+          shoulderTiltDeg: 12,
+          faceYawDeg: 18,
+          facePitchDeg: 15,
+          minBodyVisibility: 0.55,
+        }),
+        personDetectionParams: JSON.stringify({
+          confidenceThreshold: 0.6,
+          nmsIouThreshold: 0.5,
+          maxPersons: 10,
+        }),
+        compression: JSON.stringify({
+          maxFileSizeKb: 1000,
+          minQuality: 0.7,
+          qualityStep: 0.05,
+          dimensionStep: 0.05,
+          stripMetadata: true,
+          stripChunks: true,
+        }),
+        captureTimerSeconds: 3,
+        taglineRefreshMs: 2400,
+        productTapBehavior: 'expand',
+        debugLogging: false,
+        telemetryEnabled: false,
+        autoPreloadModel: false,
+        themePrimaryColor: '#7c2d4a',
+        themeAccentColor: '#c9a55c',
+        themeBackgroundColor: '#faf8f5',
+        themeFontFamily: 'serif',
+        themeBaseFontSize: 'base',
+      },
+    });
+    log('Settings seeded (UI defaults: PKR currency, Plum Boutique theme, YOLOv8n-pose models)');
+  } else {
+    log('Settings already exist, skipping seed');
   }
 
   // --- Products (dummy catalog so the boutique UI isn't empty) ----------

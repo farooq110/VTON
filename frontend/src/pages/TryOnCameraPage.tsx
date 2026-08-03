@@ -79,10 +79,12 @@ export function TryOnCameraPage() {
   useEffect(() => {
     const currentSelected = useAuthStore.getState().selectedProductId;
     if (!currentSelected) {
+      // Issue 4 fix — use variant: "warning" (amber) so the toast is
+      // clearly a friendly warning, not a red error.
       toast({
         title: "Please select a garment first",
         description: "Browse the collection and pick a piece to try on before opening the camera.",
-        // No `variant: "destructive"` — friendly warning.
+        variant: "warning",
       });
       navigate("/products", { replace: true });
     }
@@ -225,11 +227,12 @@ export function TryOnCameraPage() {
   const tryWithSavedImage = useCallback((img: SavedCaptureImage) => {
     stopCamera();
     if (!product) {
-      // Issue 2 fix — friendly warning (not red error).
+      // Issue 4 fix — use variant: "warning" (amber) so the toast is
+      // clearly a friendly warning, not a red error.
       toast({
         title: "Please select a garment first",
         description: "Browse the collection and pick a garment to try on.",
-        // No `variant: "destructive"` — friendly warning.
+        variant: "warning",
       });
       return; // stay on the camera page — don't navigate away
     }
@@ -559,6 +562,10 @@ export function TryOnCameraPage() {
         open={showAddPerson}
         onModalOpen={() => stopCamera()}
         onClose={() => setShowAddPerson(false)}
+        // Issue 6 fix — hide the "Capture from camera" option inside the
+        // Add Person modal because the Try-On Camera page ALREADY has its
+        // own camera. Showing it here would be redundant.
+        hideCameraOption
       />
     </div>
   );

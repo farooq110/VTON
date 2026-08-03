@@ -91,3 +91,70 @@ export async function listBrands(): Promise<BrandDto[]> {
   });
   return brands.map(toDto);
 }
+
+/**
+ * Upserts the active brand — creates it if none exists, updates if it does.
+ * Called by `PUT /api/brand` from the frontend's SettingsPage Save button.
+ */
+export async function upsertActiveBrand(
+  patch: BrandUpdateInput,
+): Promise<BrandDto> {
+  let brand = await prisma.brand.findFirst({
+    where: { isActive: true },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  if (!brand) {
+    brand = await prisma.brand.create({
+      data: {
+        name: patch.name ?? 'Atelier Nova',
+        tagline: patch.tagline ?? 'Try then Buy',
+        logoUrl: patch.logoUrl ?? null,
+        coverBannerUrl: patch.coverBannerUrl ?? null,
+        customName: patch.customName ?? null,
+        customLogoUrl: patch.customLogoUrl ?? null,
+        customCoverBannerUrl: patch.customCoverBannerUrl ?? null,
+        primaryColor: patch.primaryColor ?? '#1c1917',
+        accentColor: patch.accentColor ?? '#d4a017',
+        isActive: true,
+      },
+    });
+    svcLogger.info({ brandId: brand.id }, 'brand created (upsert)');
+  } else {
+    brand = await prisma.brand.update({
+      where: { id: brand.id },
+      data: patch,
+    });
+    svcLogger.info({ brandId: brand.id }, 'brand updated (upsert)');
+  }
+
+  return toDto(brand);
+}
+
+export async function clearCustomLogo(): Promise<BrandDto> {
+  const brand = await prisma.brand.findFirst({
+    where: { isActive: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (!brand) throw new Error('No active brand found');
+  const updated = await prisma.brand.update({
+    where: { id: brand.id },
+    data: { customLogoUrl: null },
+  });
+  svcLogger.info({ brandId: brand.id }, 'custom logo cleared');
+  return toDto(updated);
+}
+
+export async function clearCustomCover(): Promise<BrandDto> {
+  const brand = await prisma.brand.findFirst({
+    where: { isActive: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (!brand) throw new Error('No active brand found');
+  const updated = await prisma.brand.update({
+    where: { id: brand.id },
+    data: { customCoverBannerUrl: null },
+  });
+  svcLogger.info({ brandId: brand.id }, 'custom cover cleared');
+  return toDto(updated);
+}

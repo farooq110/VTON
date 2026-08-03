@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertCircle,
+  Camera,
   CheckCircle2,
   FolderOpen,
   Link2,
@@ -63,6 +64,13 @@ export interface AddCapturePanelProps {
   onModalOpen?: () => void;
   /** Fired when the modal closes (after success, cancel, or backdrop click). */
   onClose?: () => void;
+  /**
+   * Issue 6 fix — when true, the "Capture from camera" option is HIDDEN
+   * inside the modal. This is used by the Try-On Camera page (which already
+   * has its own camera), so the user doesn't see a redundant camera option
+   * inside the Add Person modal. Default: false (show the camera option).
+   */
+  hideCameraOption?: boolean;
 }
 
 type StageStatus = "pending" | "active" | "passed" | "failed";
@@ -89,7 +97,7 @@ const ALLOWED_MIME = [
   "image/gif",
 ];
 
-export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen }: AddCapturePanelProps) {
+export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen, hideCameraOption = false }: AddCapturePanelProps) {
   const settings = useAuthStore((s) => s.settings);
   const addSavedImage = useAuthStore((s) => s.addSavedImage);
   const logActivity = useAuthStore((s) => s.logActivity);
@@ -122,6 +130,15 @@ export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen }: 
   ]);
   const [failure, setFailure] = useState<ValidationFailure | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Issue 6 fix — camera capture state. When the user clicks "Capture from
+  // camera" inside the AddCapturePanel, we open the device camera inline
+  // (a <video> element + capture button). The captured frame is then run
+  // through the SAME 3-stage validation pipeline as file/URL uploads.
+  const [showCamera, setShowCamera] = useState(false);
+  const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
 
   // Lock the body's page scroll while the AddCapture modal (or its fullscreen
   // image viewer) is open — prevents the page behind from scrolling when the
@@ -156,14 +173,72 @@ export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen }: 
 
   const closeModal = () => {
     if (isProcessing) return;
+    // Issue 6 fix — stop the camera if it's open when the modal closes.
+    stopCameraCapture();
     if (!isControlled) setInternalOpen(false);
     setSuccess(false);
     setUrlValue("");
     setPreviewImage(null);
     setLastSource(null);
+    setShowCamera(false);
     reset();
     onClose?.();
   };
+
+  // ─── Issue 6 fix — inline camera capture ──────────────────────────────
+  // Opens the device camera inside the modal (no redirect to /tryon/camera).
+  // The user captures a frame, which is then run through the SAME 3-stage
+  // validation pipeline as file/URL uploads. This lets the Capture Gallery
+  // camera button capture a photo right there without leaving the page.
+  const startCameraCapture = useCallback(async () => {
+    setCameraError(null);
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraError("Camera API not available in this environment.");
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      cameraStreamRef.current = stream;
+      setShowCamera(true);
+      // Wait for the video element to mount, then attach the stream.
+      requestAnimationFrame(() => {
+        const v = cameraVideoRef.current;
+        if (v) {
+          v.srcObject = stream;
+          v.play().catch(() => {});
+        }
+      });
+    } catch (e) {
+      const msg =
+        e instanceof DOMException && e.name === "NotAllowedError"
+          ? "Camera permission denied. Please allow camera access."
+          : e instanceof DOMException && e.name === "NotFoundError"
+            ? "No camera found."
+            : e instanceof Error ? e.message : "Unable to start camera.";
+      setCameraError(msg);
+    }
+  }, []);
+
+  const stopCameraCapture = useCallback(() => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => {
+        try {
+          t.stop();
+          cameraStreamRef.current?.removeTrack(t);
+        } catch {
+          // already stopped
+        }
+      });
+      cameraStreamRef.current = null;
+    }
+    setShowCamera(false);
+  }, []);
+
+  // captureFrame is defined AFTER runValidation (below) because it depends
+  // on it. We can't use it before it's declared.
 
   const handlePickFile = () => {
     setError(null);
@@ -351,6 +426,33 @@ export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen }: 
     },
     [addSavedImage, checkPose, compress, detect, logActivity, settings, toast],
   );
+
+  // Issue 6 fix — capture a frame from the inline camera. Defined here
+  // (after runValidation) because it depends on runValidation.
+  const captureFrame = useCallback(async () => {
+    const v = cameraVideoRef.current;
+    if (!v || v.videoWidth === 0) {
+      setCameraError("Camera not ready yet. Please wait a moment and try again.");
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = v.videoWidth;
+    canvas.height = v.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      setCameraError("Could not capture frame.");
+      return;
+    }
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    // Stop the camera now that we have the frame.
+    stopCameraCapture();
+    setLastSource({ type: "file" });
+    setError(null);
+    setPreviewImage(dataUrl);
+    const ok = await runValidation(dataUrl);
+    if (ok) setSuccess(true);
+  }, [runValidation, stopCameraCapture]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -619,53 +721,109 @@ export function AddCapturePanel({ open: controlledOpen, onClose, onModalOpen }: 
                     </motion.div>
                   )}
 
-                  {/* FORM — pick from disk or URL */}
+                  {/* FORM — pick from disk, camera, or URL */}
                   {showForm && (
                     <div className="space-y-4">
-                      <button
-                        onClick={handlePickFile}
-                        className="w-full flex items-center gap-3 p-4 rounded-xl border border-dashed border-border hover:border-primary hover:bg-primary/5 transition text-left"
-                      >
-                        <div className="h-10 w-10 rounded-lg bg-primary/10 text-primary grid place-items-center shrink-0">
-                          <FolderOpen className="h-5 w-5" />
+                      {/* Issue 6 fix — inline camera capture. When the user
+                          clicks "Capture from camera", we open the device
+                          camera INSIDE the modal (no redirect). The captured
+                          frame runs through the same 3-stage validation. */}
+                      {showCamera ? (
+                        <div className="space-y-3">
+                          <div className="relative w-full aspect-[4/3] rounded-xl overflow-hidden bg-black">
+                            <video
+                              ref={cameraVideoRef}
+                              autoPlay
+                              playsInline
+                              muted
+                              className="absolute inset-0 h-full w-full object-cover"
+                            />
+                            <button
+                              onClick={stopCameraCapture}
+                              className="absolute top-2 right-2 z-10 h-8 w-8 rounded-full bg-black/60 text-white grid place-items-center hover:bg-black/80 transition"
+                              aria-label="Close camera"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                          {cameraError && (
+                            <p className="text-xs text-destructive">{cameraError}</p>
+                          )}
+                          <Button
+                            onClick={captureFrame}
+                            className="w-full h-11 gap-2"
+                          >
+                            <Camera className="h-4 w-4" /> Capture photo
+                          </Button>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium">From device</p>
-                          <p className="text-xs text-muted-foreground">JPEG, PNG, WebP, AVIF · max 25 MB</p>
-                        </div>
-                      </button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={handlePickFile}
+                            className="w-full flex items-center gap-3 p-4 rounded-xl border border-dashed border-border hover:border-primary hover:bg-primary/5 transition text-left"
+                          >
+                            <div className="h-10 w-10 rounded-lg bg-primary/10 text-primary grid place-items-center shrink-0">
+                              <FolderOpen className="h-5 w-5" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium">From device</p>
+                              <p className="text-xs text-muted-foreground">JPEG, PNG, WebP, AVIF · max 25 MB</p>
+                            </div>
+                          </button>
 
-                      <div className="flex items-center gap-3">
-                        <div className="flex-1 h-px bg-border" />
-                        <span className="text-[10px] uppercase tracking-widest text-muted-foreground">or</span>
-                        <div className="flex-1 h-px bg-border" />
-                      </div>
+                          {/* Issue 6 fix — "Capture from camera" button. Opens
+                              the device camera inline (no redirect).
+                              HIDDEN when `hideCameraOption` is true (e.g. when
+                              opened from the Try-On Camera page, which already
+                              has its own camera). */}
+                          {!hideCameraOption && (
+                            <button
+                              onClick={startCameraCapture}
+                              className="w-full flex items-center gap-3 p-4 rounded-xl border border-dashed border-border hover:border-primary hover:bg-primary/5 transition text-left"
+                            >
+                              <div className="h-10 w-10 rounded-lg bg-accent/10 text-accent grid place-items-center shrink-0">
+                                <Camera className="h-5 w-5" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium">Capture from camera</p>
+                                <p className="text-xs text-muted-foreground">Take a photo with your device camera</p>
+                              </div>
+                            </button>
+                          )}
 
-                      <div className="space-y-2">
-                        <div className="relative">
-                          <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                          <Input
-                            value={urlValue}
-                            onChange={(e) => {
-                              setUrlValue(e.target.value);
-                              setError(null);
-                            }}
-                            placeholder="https://example.com/photo.jpg"
-                            className="pl-9 h-10 text-xs font-mono"
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && urlValue.trim()) handleAddUrl();
-                            }}
-                          />
-                        </div>
-                        <Button
-                          onClick={handleAddUrl}
-                          disabled={!urlValue.trim()}
-                          className="w-full h-10 text-xs gap-1.5"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          Add from URL
-                        </Button>
-                      </div>
+                          <div className="flex items-center gap-3">
+                            <div className="flex-1 h-px bg-border" />
+                            <span className="text-[10px] uppercase tracking-widest text-muted-foreground">or</span>
+                            <div className="flex-1 h-px bg-border" />
+                          </div>
+
+                          <div className="space-y-2">
+                            <div className="relative">
+                              <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                              <Input
+                                value={urlValue}
+                                onChange={(e) => {
+                                  setUrlValue(e.target.value);
+                                  setError(null);
+                                }}
+                                placeholder="https://example.com/photo.jpg"
+                                className="pl-9 h-10 text-xs font-mono"
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && urlValue.trim()) handleAddUrl();
+                                }}
+                              />
+                            </div>
+                            <Button
+                              onClick={handleAddUrl}
+                              disabled={!urlValue.trim()}
+                              className="w-full h-10 text-xs gap-1.5"
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              Add from URL
+                            </Button>
+                          </div>
+                        </>
+                      )}
 
                       <AnimatePresence>
                         {error && (

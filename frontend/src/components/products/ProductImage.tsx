@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -9,20 +9,19 @@ import { cn } from "@/lib/utils";
  * is FULLY loaded, then cross-fades the real image in. No layout shift,
  * no half-loaded images popping in.
  *
- * Features:
- *   - Shimmer skeleton while loading (Tailwind `animate-pulse` + gradient).
- *   - Cross-fade transition from skeleton → image (smooth, not jarring).
- *   - `onError` fallback to a tasteful "image unavailable" placeholder so
- *     broken images don't show the browser's default broken-image icon.
- *   - `loading="lazy"` by default for off-screen images (perf).
- *   - Works for ANY image src (product imageUrl, garmentOverlayUrl, etc.).
+ * Issue 5 fix — the wrapper div now accepts a `wrapperClassName` prop so
+ * the caller can control its sizing (e.g. `h-full w-full` to fill a
+ * parent with `aspect-[4/5]`). Previously the wrapper had no explicit
+ * dimensions, so on first render it could collapse to 0×0 and the image
+ * inside (which is `absolute inset-0`) wouldn't show until a re-render
+ * was triggered (e.g. by a refresh).
  *
- * Usage:
- *   <ProductImage src={resolveProductImage(product)} alt={product.name}
- *     className="absolute inset-0 h-full w-full object-cover" />
- *
- * The `className` prop is applied to the <img> AND the skeleton placeholder
- * so they have identical dimensions (no layout shift on load).
+ * Issue 3 fix — check `img.complete` on mount via a ref. If the image is
+ * already cached (browser loaded it instantly), the `onLoad` event may
+ * NOT fire (React doesn't fire onLoad for cached images in some cases).
+ * This caused images to stay invisible (opacity-0) on first visit until
+ * a refresh forced a re-mount. Now we check `img.complete` in a
+ * useLayoutEffect and set `loaded=true` if the image is already loaded.
  */
 export interface ProductImageProps
   extends Omit<React.ImgHTMLAttributes<HTMLImageElement>, "src" | "onError"> {
@@ -30,6 +29,8 @@ export interface ProductImageProps
   alt: string;
   /** Called when the image fails to load. If omitted, a default placeholder is shown. */
   onError?: (e: React.SyntheticEvent<HTMLImageElement, Event>) => void;
+  /** className for the OUTER wrapper div (controls sizing/positioning). */
+  wrapperClassName?: string;
 }
 
 export function ProductImage({
@@ -37,11 +38,13 @@ export function ProductImage({
   alt,
   onError,
   className,
+  wrapperClassName,
   loading = "lazy",
   ...rest
 }: ProductImageProps) {
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   // Reset state when src changes (e.g. product card re-used for a new product).
   useEffect(() => {
@@ -49,8 +52,19 @@ export function ProductImage({
     setErrored(false);
   }, [src]);
 
+  // Issue 3 fix — check if the image is already cached + complete on mount
+  // (and after src changes). Browsers sometimes DON'T fire onLoad for
+  // cached images, which left the image stuck at opacity-0 forever. This
+  // layout effect runs synchronously after DOM mutation but before paint,
+  // so the user never sees a flash of the skeleton.
+  useEffect(() => {
+    if (imgRef.current && imgRef.current.complete && imgRef.current.naturalWidth > 0) {
+      setLoaded(true);
+    }
+  }, [src]);
+
   return (
-    <div className="relative overflow-hidden">
+    <div className={cn("relative overflow-hidden", wrapperClassName)}>
       {/* Skeleton placeholder — visible until the image is fully loaded.
           Uses `animate-pulse` + a subtle gradient for a premium shimmer.
           Identical sizing to the img (via shared className) so no layout
@@ -96,6 +110,7 @@ export function ProductImage({
           cross-faded in via the `opacity` transition. */}
       {!errored && (
         <img
+          ref={imgRef}
           src={src}
           alt={alt}
           loading={loading}

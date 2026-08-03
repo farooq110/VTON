@@ -112,8 +112,12 @@ export function TrendingProducts({ className = "" }: { className?: string }) {
 
   return (
     <div className={`flex flex-col ${className}`}>
-      {/* Header — sticky to the top of the viewport (under the main header). */}
-      <div className="sticky top-[64px] sm:top-[72px] lg:top-[80px] z-30 flex items-center justify-between px-3 sm:px-6 lg:px-10 py-3 shrink-0 border-b border-border/40 bg-background/95 backdrop-blur-md">
+      {/* Header — sticky to the top of the viewport. Issue 2 fix: when the
+          main page header is hidden (hero scrolled out), this header sticks
+          to `top-0` and becomes the top bar. The main header is fixed + transparent
+          and only visible when the hero is in view, so this header doesn't need
+          to offset for it. */}
+      <div className="sticky top-0 z-30 flex items-center justify-between px-3 sm:px-6 lg:px-10 py-3 shrink-0 border-b border-border/40 bg-background/95 backdrop-blur-md">
         <div className="flex items-center gap-2">
           <Flame className="h-5 w-5 text-accent" />
           <h2 className="font-display text-lg sm:text-xl font-medium">Trending now</h2>

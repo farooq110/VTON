@@ -56,10 +56,12 @@ export function GlobalHeader({ title, subtitle, showBack = true, backTo, rightSl
     if (path === "/tryon/camera") {
       const selectedId = useAuthStore.getState().selectedProductId;
       if (!selectedId) {
+        // Issue 4 fix — use variant: "warning" (amber) so the toast is
+        // clearly a friendly warning, not a red error.
         toast({
           title: "Please select a garment first",
           description: "Browse the collection and pick a garment before opening the try-on camera.",
-          // No `variant: "destructive"` — friendly warning, not an error.
+          variant: "warning",
         });
         return;
       }

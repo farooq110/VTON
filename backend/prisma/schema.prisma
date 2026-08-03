@@ -40,8 +40,39 @@ model Brand {
   primaryColor         String?  @default("#1c1917")
   accentColor          String?  @default("#d4a017")
   isActive             Boolean  @default(true)
+  settings             Setting?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
+}
+
+/// App-wide settings — fetched by the frontend on load via `GET /api/settings`
+/// and persisted via `PUT /api/settings`. One row per brand (linked via
+/// brandId); the active brand's settings are what the frontend reads.
+model Setting {
+  id                       String   @id @default(cuid()) @map("_id")
+  brandId                  String   @unique
+  brand                    Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  currency                 String   @default("PKR")
+  priceRangeMin            Int      @default(0)
+  priceRangeMax            Int      @default(10000)
+  personDetectionModelId   String   @default("yolov8n-pose")
+  postureModelId           String   @default("yolov8n-pose")
+  poseThresholds           String   @default("{\"personScore\":0.6,\"shoulderTiltDeg\":12,\"faceYawDeg\":18,\"facePitchDeg\":15,\"minBodyVisibility\":0.55}")
+  personDetectionParams    String   @default("{\"confidenceThreshold\":0.6,\"nmsIouThreshold\":0.5,\"maxPersons\":10}")
+  compression              String   @default("{\"maxFileSizeKb\":1000,\"minQuality\":0.7,\"qualityStep\":0.05,\"dimensionStep\":0.05,\"stripMetadata\":true,\"stripChunks\":true}")
+  captureTimerSeconds      Int      @default(3)
+  taglineRefreshMs         Int      @default(2400)
+  productTapBehavior       String   @default("expand")
+  debugLogging             Boolean  @default(false)
+  telemetryEnabled        Boolean  @default(false)
+  autoPreloadModel         Boolean  @default(false)
+  themePrimaryColor        String   @default("#7c2d4a")
+  themeAccentColor         String   @default("#c9a55c")
+  themeBackgroundColor     String   @default("#faf8f5")
+  themeFontFamily          String   @default("serif")
+  themeBaseFontSize        String   @default("base")
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 }
 
 /// Garment catalog — read by the frontend's ProductsPage, TrendingProducts

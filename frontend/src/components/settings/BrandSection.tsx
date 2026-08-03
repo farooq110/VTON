@@ -1,7 +1,6 @@
 import { useRef, useState } from "react";
 import {
   AlertCircle,
-  Check,
   Image as ImageIcon,
   Loader2,
   RotateCcw,
@@ -11,53 +10,48 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useAuthStore } from "@/lib/store";
 import { resolveAssetUrl } from "@/lib/utils";
 import { useToast } from "@/components/ui/toast";
+import type { Brand } from "@/types";
 
 /**
  * BrandSection — manager-only settings panel for brand identity:
  * cover image, brand name, and logo.
  *
- * Ported from the Next.js preview's tryon/settings/brand-section.tsx and
- * adapted to the frontend's `useAuthStore` + `@/components/ui/toast`. The
- * preview's `useUILogger` is replaced with the store's `logActivity`
- * (which writes to the same ActivityLogPanel surface).
+ * Issue 1+2 fix — BrandSection now receives `draftBrand` +
+ * `patchDraftBrand` as props instead of reading from / writing to the
+ * store directly. This means brand changes update the DRAFT (not the
+ * store), so they DON'T apply immediately. The parent SettingsPage
+ * commits the draft to the store only when the user clicks the header
+ * Save button.
  *
- * Spec:
- *   - "the cover image should set by manager from settings and from server side"
- *   - "Set logo brand name from setting too control by manager"
- *   - "The manager should control app settings like cover image, brand name,
- *      logo etc"
- *
- * Each field can be set by:
- *   1. Uploading a local file (converted to a data URL for preview-only storage)
- *   2. Pasting a CDN URL (recommended for production — points at a backend-
- *      hosted asset)
- *
- * All overrides are persisted across refreshes via the store's `partialize`.
- * The home screen reads `customX ?? defaultX`.
+ * Issue 1 fix — the per-field "Save" button next to the brand name has
+ * been REMOVED. The user now uses the header Save button to persist all
+ * changes (brand name, logo, cover) at once.
  */
-export function BrandSection() {
-  const brand = useAuthStore((s) => s.brand);
-  const setBrandCoverImage = useAuthStore((s) => s.setBrandCoverImage);
-  const setBrandName = useAuthStore((s) => s.setBrandName);
-  const setBrandLogo = useAuthStore((s) => s.setBrandLogo);
-  const logActivity = useAuthStore((s) => s.logActivity);
+
+export interface BrandSectionProps {
+  /** The DRAFT brand (pending changes, not yet committed to the store). */
+  draftBrand: Brand;
+  /** Update the DRAFT brand. Does NOT apply to the store until Save. */
+  patchDraftBrand: (patch: Partial<Brand>) => void;
+}
+
+export function BrandSection({ draftBrand, patchDraftBrand }: BrandSectionProps) {
   const { toast } = useToast();
 
   const coverInputRef = useRef<HTMLInputElement | null>(null);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
-  const [nameValue, setNameValue] = useState(brand.customName ?? brand.name);
+  const [nameValue, setNameValue] = useState(draftBrand.customName ?? draftBrand.name);
   const [coverUrlValue, setCoverUrlValue] = useState("");
   const [logoUrlValue, setLogoUrlValue] = useState("");
   const [isUploadingCover, setIsUploadingCover] = useState(false);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const activeCoverUrl = resolveAssetUrl(brand.customCoverBannerUrl) ?? resolveAssetUrl(brand.coverBannerUrl);
-  const activeLogoUrl = resolveAssetUrl(brand.customLogoUrl) ?? resolveAssetUrl(brand.logoUrl);
-  const activeName = brand.customName ?? brand.name;
+  const activeCoverUrl = resolveAssetUrl(draftBrand.customCoverBannerUrl) ?? resolveAssetUrl(draftBrand.coverBannerUrl);
+  const activeLogoUrl = resolveAssetUrl(draftBrand.customLogoUrl) ?? resolveAssetUrl(draftBrand.logoUrl);
+  const activeName = draftBrand.customName ?? draftBrand.name;
 
   /* ─── Cover image ───────────────────────────────────────────── */
   const handleCoverFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -73,15 +67,11 @@ export function BrandSection() {
     }
     setError(null);
     setIsUploadingCover(true);
-    logActivity({
-      category: "settings",
-      label: "Cover image upload started",
-      detail: `${file.name} · ${(file.size / 1024).toFixed(0)} KB`,
-    });
     try {
       const dataUrl = await readFileAsDataUrl(file);
-      setBrandCoverImage(dataUrl);
-      toast({ title: "Cover image updated" });
+      // Issue 2 fix — patch the DRAFT, don't call setBrandCoverImage.
+      patchDraftBrand({ customCoverBannerUrl: dataUrl });
+      toast({ title: "Cover image staged", description: "Click Save to apply." });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to read image.");
     } finally {
@@ -103,14 +93,10 @@ export function BrandSection() {
       return;
     }
     setError(null);
-    logActivity({
-      category: "settings",
-      label: "Cover image URL set",
-      detail: url.slice(0, 80),
-    });
-    setBrandCoverImage(url);
+    // Issue 2 fix — patch the DRAFT, don't call setBrandCoverImage.
+    patchDraftBrand({ customCoverBannerUrl: url });
     setCoverUrlValue("");
-    toast({ title: "Cover image updated" });
+    toast({ title: "Cover image staged", description: "Click Save to apply." });
   };
 
   /* ─── Logo image ────────────────────────────────────────────── */
@@ -127,15 +113,11 @@ export function BrandSection() {
     }
     setError(null);
     setIsUploadingLogo(true);
-    logActivity({
-      category: "settings",
-      label: "Logo upload started",
-      detail: `${file.name} · ${(file.size / 1024).toFixed(0)} KB`,
-    });
     try {
       const dataUrl = await readFileAsDataUrl(file);
-      setBrandLogo(dataUrl);
-      toast({ title: "Logo updated" });
+      // Issue 2 fix — patch the DRAFT, don't call setBrandLogo.
+      patchDraftBrand({ customLogoUrl: dataUrl });
+      toast({ title: "Logo staged", description: "Click Save to apply." });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to read logo.");
     } finally {
@@ -157,47 +139,38 @@ export function BrandSection() {
       return;
     }
     setError(null);
-    logActivity({
-      category: "settings",
-      label: "Logo URL set",
-      detail: url.slice(0, 80),
-    });
-    setBrandLogo(url);
+    // Issue 2 fix — patch the DRAFT, don't call setBrandLogo.
+    patchDraftBrand({ customLogoUrl: url });
     setLogoUrlValue("");
-    toast({ title: "Logo updated" });
+    toast({ title: "Logo staged", description: "Click Save to apply." });
   };
 
   /* ─── Brand name ────────────────────────────────────────────── */
-  const handleNameSave = () => {
-    const trimmed = nameValue.trim();
-    if (!trimmed) {
-      setError("Brand name cannot be empty.");
-      return;
-    }
-    setError(null);
-    logActivity({
-      category: "settings",
-      label: "Brand name set",
-      detail: trimmed,
-    });
-    setBrandName(trimmed);
-    toast({ title: "Brand name updated" });
+  // Issue 1 fix — the per-field Save button has been REMOVED. The brand
+  // name input now patches the DRAFT on every keystroke; the header Save
+  // button persists it. The "Reset to default" link also patches the draft.
+  const handleNameChange = (value: string) => {
+    setNameValue(value);
+    patchDraftBrand({ customName: value.trim() || undefined });
   };
 
   /* ─── Reset all ─────────────────────────────────────────────── */
   const handleResetAll = () => {
-    logActivity({ category: "settings", label: "Reset all brand customizations" });
-    setBrandCoverImage(null);
-    setBrandLogo(null);
-    setBrandName(null);
-    setNameValue(brand.name);
+    // Issue 2 fix — reset the DRAFT only (not the store). The user still
+    // needs to click the header Save button to commit the reset.
+    patchDraftBrand({
+      customCoverBannerUrl: undefined,
+      customLogoUrl: undefined,
+      customName: undefined,
+    });
+    setNameValue(draftBrand.name);
     setCoverUrlValue("");
     setLogoUrlValue("");
     setError(null);
-    toast({ title: "Reverted all brand customizations to defaults" });
+    toast({ title: "Brand reset to defaults", description: "Click Save to apply." });
   };
 
-  const hasAnyCustom = !!(brand.customCoverBannerUrl || brand.customLogoUrl || brand.customName);
+  const hasAnyCustom = !!(draftBrand.customCoverBannerUrl || draftBrand.customLogoUrl || draftBrand.customName);
 
   return (
     <div className="space-y-6 pt-2">
@@ -247,34 +220,28 @@ export function BrandSection() {
         <Label className="flex items-center gap-1.5">
           <Type className="h-3.5 w-3.5" /> Brand name
         </Label>
-        <div className="flex gap-2">
-          <Input
-            value={nameValue}
-            onChange={(e) => {
-              setNameValue(e.target.value);
-              setError(null);
-            }}
-            placeholder={brand.name}
-            className="h-10"
-            maxLength={50}
-          />
-          <Button
-            onClick={handleNameSave}
-            disabled={!nameValue.trim() || nameValue.trim() === (brand.customName ?? brand.name)}
-            className="h-10 gap-2 shrink-0"
-          >
-            <Check className="h-4 w-4" /> Save
-          </Button>
-        </div>
+        {/* Issue 1 fix — removed the per-field Save button. The brand name
+            input now patches the DRAFT on every keystroke; the header Save
+            button persists it to the store + server. */}
+        <Input
+          value={nameValue}
+          onChange={(e) => {
+            handleNameChange(e.target.value);
+            setError(null);
+          }}
+          placeholder={draftBrand.name}
+          className="h-10"
+          maxLength={50}
+        />
         <p className="text-[11px] text-muted-foreground">
           Displayed in the header and footer. Default:{" "}
-          <code className="font-mono">{brand.name}</code>.
-          {brand.customName && (
+          <code className="font-mono">{draftBrand.name}</code>.
+          {draftBrand.customName && (
             <button
               onClick={() => {
-                setBrandName(null);
-                setNameValue(brand.name);
-                toast({ title: "Brand name reset" });
+                patchDraftBrand({ customName: undefined });
+                setNameValue(draftBrand.name);
+                toast({ title: "Brand name reset", description: "Click Save to apply." });
               }}
               className="ml-2 text-accent hover:underline"
             >

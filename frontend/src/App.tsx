@@ -9,6 +9,7 @@ import { useAuthStore } from "@/lib/store";
 import { logger } from "@/lib/logger";
 import { warmDownloadedModels } from "@/hooks/usePoseDetection";
 import { DEFAULT_SETTINGS } from "@/lib/constants";
+import apiClient from "@/lib/api-client";
 import { SignInPage } from "@/pages/SignInPage";
 import { HomePage } from "@/pages/HomePage";
 import { ProductsPage } from "@/pages/ProductsPage";
@@ -130,6 +131,45 @@ export default function App() {
   useEffect(() => {
     if (effectivelyAuthed && typeof seedDummyCaptures === "function") seedDummyCaptures();
   }, [effectivelyAuthed, seedDummyCaptures]);
+
+  // Issue 3 fix — fetch settings + brand from the server on auth. This
+  // ensures the app always starts with the server's canonical state,
+  // not the localStorage-persisted state (which may be stale if the user
+  // changed settings on another device). The fetched settings overwrite
+  // the store, which triggers ThemeApplier to apply the correct theme.
+  useEffect(() => {
+    if (!effectivelyAuthed) return;
+    const fetchServerSettings = async () => {
+      try {
+        const [settingsRes, brandRes] = await Promise.allSettled([
+          apiClient.get("/settings"),
+          apiClient.get("/brand"),
+        ]);
+        // Unwrap the backend envelope: { success, data: { settings } }
+        if (settingsRes.status === "fulfilled") {
+          const body = settingsRes.value?.data;
+          const inner = body?.data ?? body;
+          const settings = inner?.settings ?? inner;
+          if (settings && typeof settings === "object") {
+            useAuthStore.getState().updateSettings(settings);
+          }
+        }
+        // Unwrap: { success, data: { brand } }
+        if (brandRes.status === "fulfilled") {
+          const body = brandRes.value?.data;
+          const inner = body?.data ?? body;
+          const brand = inner?.brand ?? inner;
+          if (brand && typeof brand === "object") {
+            useAuthStore.getState().setBrand(brand);
+          }
+        }
+      } catch {
+        // Best-effort — if the server is unreachable, fall back to the
+        // localStorage-persisted state (which is already in the store).
+      }
+    };
+    fetchServerSettings();
+  }, [effectivelyAuthed]);
 
   // Listen for the hard-signout event fired by the api-client 401 interceptor.
   // When fired, clear ALL TanStack Query caches so no stale data drives

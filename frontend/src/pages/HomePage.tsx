@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -80,7 +80,28 @@ export function HomePage() {
   // Slide-down menu — visible on ALL screen sizes on the home page.
   const [menuOpen, setMenuOpen] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
+  // Issue 2 fix — track whether the hero section is in view. When it is,
+  // the main page header is visible (transparent, overlaying the hero).
+  // When the hero scrolls OUT of view, the main header hides and the
+  // trending list header takes over as the sticky top bar.
+  const [heroInView, setHeroInView] = useState(true);
+  const heroRef = useRef<HTMLElement | null>(null);
   const { toast } = useToast();
+
+  // Issue 2 fix — IntersectionObserver on the hero section. When >50% of
+  // the hero is visible, `heroInView` = true → main header shows. When the
+  // hero scrolls below 50%, `heroInView` = false → main header hides and
+  // the trending header becomes the top sticky bar.
+  useEffect(() => {
+    const node = heroRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setHeroInView(entry.isIntersecting && entry.intersectionRatio > 0.5),
+      { threshold: [0, 0.5, 1] },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   // Show the scroll-to-top button when the user has scrolled down more than
   // 400px. Hides when near the top so it doesn't cover content.
@@ -100,10 +121,12 @@ export function HomePage() {
     if (path === "/tryon/camera") {
       const selectedId = useAuthStore.getState().selectedProductId;
       if (!selectedId) {
+        // Issue 4 fix — use variant: "warning" (amber) so the toast is
+        // clearly a friendly warning, not a red error.
         toast({
           title: "Please select a garment first",
           description: "Browse the collection and pick a garment before opening the try-on camera.",
-          // No `variant: "destructive"` — friendly warning.
+          variant: "warning",
         });
         return; // don't close menu, don't navigate
       }
@@ -130,10 +153,19 @@ export function HomePage() {
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
-      {/* Sticky header with hamburger menu — visible on ALL screen sizes.
-          `relative` so the absolute-positioned dropdown menu anchors here.
-          The page scrolls naturally; the header sticks to the top. */}
-      <header className="relative sticky top-0 z-40 shrink-0 bg-background/95 backdrop-blur-md border-b border-border/40">
+      {/* Issue 1+2 fix — the header is now FIXED (not sticky) and TRANSPARENT
+          so the hero section's colorful background extends fully underneath
+          it. The header hides (via opacity + pointer-events) when the hero
+          scrolls out of view — at that point the TrendingProducts header
+          takes over as the sticky top bar. When the hero scrolls back into
+          view, the main header reappears. */}
+      <header
+        className={`fixed top-0 left-0 right-0 z-40 transition-all duration-300 ${
+          heroInView
+            ? "opacity-100 pointer-events-auto"
+            : "opacity-0 pointer-events-none -translate-y-full"
+        }`}
+      >
         <div className="px-3 sm:px-6 lg:px-10 py-3 sm:py-5 flex items-center justify-between gap-2">
           <BrandLockup
             logoUrl={logoUrl}
@@ -204,10 +236,12 @@ export function HomePage() {
 
       {/*
         Cover banner — FULL BLEED at ALL breakpoints.
-        NO padding, NO margin, NO border radius.
-        The image consumes the entire viewport width edge-to-edge.
+        Issue 1 fix — the hero section extends fully under the fixed
+        transparent header. NO padding, NO margin, NO border radius.
+        Issue 2 fix — `ref={heroRef}` lets the IntersectionObserver track
+        when the hero scrolls in/out of view to show/hide the main header.
       */}
-      <section className="shrink-0">
+      <section ref={heroRef} className="shrink-0">
         <motion.div
           initial={{ opacity: 0, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1 }}
