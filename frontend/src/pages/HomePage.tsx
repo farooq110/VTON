@@ -55,14 +55,17 @@ import { useToast } from "@/components/ui/toast";
 export function HomePage() {
   const navigate = useNavigate();
   const location = useLocation();
-  // TanStack Query — fetches brand + products and mirrors them into the store.
-  const { data: brand } = useBrand();
+  // Issue 3 fix — read brand from the Zustand store (not TanStack Query)
+  // so changes saved in Settings reflect immediately. useBrand() still
+  // runs to sync the store on first load, but the UI reads from the store.
+  useBrand();
   useProducts();
 
   // Synchronous reads from the auth store (populated by the hooks above).
   const user = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
   const products = useAuthStore((s) => s.products);
+  const brand = useAuthStore((s) => s.brand);
 
   const showSettings = canAccessSettings(user?.role);
   const isPublicUser = user?.role === "public_user";
@@ -88,16 +91,18 @@ export function HomePage() {
   const heroRef = useRef<HTMLElement | null>(null);
   const { toast } = useToast();
 
-  // Issue 2 fix — IntersectionObserver on the hero section. When >50% of
-  // the hero is visible, `heroInView` = true → main header shows. When the
-  // hero scrolls below 50%, `heroInView` = false → main header hides and
-  // the trending header becomes the top sticky bar.
+  // Issue 2 fix — IntersectionObserver hides the header as soon as the
+  // hero's bottom edge reaches the top of the viewport (i.e., when the
+  // trending header is about to stick). We use rootMargin to shrink the
+  // root by 1px from the bottom so the observer fires exactly when the
+  // hero scrolls completely past. This ensures the trending header
+  // sticks flush at top-0 with no gap.
   useEffect(() => {
     const node = heroRef.current;
     if (!node) return;
     const observer = new IntersectionObserver(
-      ([entry]) => setHeroInView(entry.isIntersecting && entry.intersectionRatio > 0.5),
-      { threshold: [0, 0.5, 1] },
+      ([entry]) => setHeroInView(entry.isIntersecting),
+      { threshold: 0, rootMargin: "0px 0px -1px 0px" },
     );
     observer.observe(node);
     return () => observer.disconnect();
@@ -391,17 +396,15 @@ function BrandLockup({
       {logoUrl ? (
         <img src={logoUrl} alt={`${name} logo`} className="h-8 sm:h-10 w-auto shrink-0" />
       ) : (
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <div className="h-7 w-7 sm:h-9 sm:w-9 rounded-full bg-primary text-primary-foreground grid place-items-center font-display italic text-sm sm:text-base shrink-0">
-            N
-          </div>
-          <div className="min-w-0">
-            <p className="font-display text-sm sm:text-xl leading-none truncate">Atelier</p>
-            <p className="font-display text-sm sm:text-xl italic text-accent leading-none truncate">Nova</p>
-          </div>
+        <div className="h-7 w-7 sm:h-9 sm:w-9 rounded-full bg-primary text-primary-foreground grid place-items-center font-display italic text-sm sm:text-base shrink-0">
+          {name.charAt(0).toUpperCase()}
         </div>
       )}
-      <span className="sr-only">{name}</span>
+      {/* Issue 1 fix — display the dynamic brand name from Settings,
+          not a hardcoded "Atelier Nova". */}
+      <span className="font-display text-sm sm:text-xl leading-none truncate">
+        {name}
+      </span>
     </div>
   );
 }

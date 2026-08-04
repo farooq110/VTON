@@ -7,8 +7,14 @@ import { z } from 'zod';
  * Issue 2 fix — logoUrl and coverBannerUrl now accept null (the frontend
  * sends the full brand object which has nullable fields). Previously the
  * schema used `z.string().url().or(z.literal(''))` which rejected null,
- * causing "Expected string, received null" validation errors when the
- * frontend sent `logoUrl: null` (which is the default for a fresh brand).
+ * causing "Expected string, received null" validation errors.
+ *
+ * Issue 1 fix (Prisma "Unknown argument `id`") — `id` and `isActive` are
+ * accepted by the schema (so validation passes) but STRIPPED before
+ * reaching Prisma's `data` block. Prisma doesn't allow `id` in `data`
+ * (it's a primary key, only valid in `where`). The `upsertActiveBrand`
+ * service function explicitly omits these fields when building the
+ * Prisma `data` object.
  */
 export const brandUpdateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
@@ -31,6 +37,9 @@ export const brandUpdateSchema = z.object({
     .or(z.literal(''))
     .nullable()
     .optional(),
+  // These are accepted by validation but stripped before Prisma — see the
+  // service's `stripNonDataFields` helper. Prisma's `data` block doesn't
+  // accept `id` (primary key) or `isActive` (managed internally).
   id: z.string().optional(),
   isActive: z.boolean().optional(),
 });

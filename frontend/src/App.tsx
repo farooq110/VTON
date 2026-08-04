@@ -126,26 +126,24 @@ export default function App() {
   const effectivelyAuthed = isAuthed && hasToken;
 
   // Seed 3 dummy person images on first run so the captures gallery isn't empty.
-  // Defensive guard: if the store was rehydrated from an old localStorage state
-  // that doesn't have seedDummyCaptures, skip silently instead of crashing.
   useEffect(() => {
     if (effectivelyAuthed && typeof seedDummyCaptures === "function") seedDummyCaptures();
   }, [effectivelyAuthed, seedDummyCaptures]);
 
-  // Issue 3 fix — fetch settings + brand from the server on auth. This
-  // ensures the app always starts with the server's canonical state,
-  // not the localStorage-persisted state (which may be stale if the user
-  // changed settings on another device). The fetched settings overwrite
-  // the store, which triggers ThemeApplier to apply the correct theme.
+  // Issue 2+3 — fetch settings + brand from the server ONCE on auth.
+  // This replaces the double-fetch that happened when both App.tsx and
+  // SettingsPage fetched on mount. The fetch is here (in App.tsx) so it
+  // runs once per auth session, not per page navigation.
   useEffect(() => {
     if (!effectivelyAuthed) return;
-    const fetchServerSettings = async () => {
+    let cancelled = false;
+    const fetchServerData = async () => {
       try {
         const [settingsRes, brandRes] = await Promise.allSettled([
           apiClient.get("/settings"),
           apiClient.get("/brand"),
         ]);
-        // Unwrap the backend envelope: { success, data: { settings } }
+        if (cancelled) return;
         if (settingsRes.status === "fulfilled") {
           const body = settingsRes.value?.data;
           const inner = body?.data ?? body;
@@ -154,7 +152,6 @@ export default function App() {
             useAuthStore.getState().updateSettings(settings);
           }
         }
-        // Unwrap: { success, data: { brand } }
         if (brandRes.status === "fulfilled") {
           const body = brandRes.value?.data;
           const inner = body?.data ?? body;
@@ -164,11 +161,11 @@ export default function App() {
           }
         }
       } catch {
-        // Best-effort — if the server is unreachable, fall back to the
-        // localStorage-persisted state (which is already in the store).
+        // Best-effort — fall back to localStorage state.
       }
     };
-    fetchServerSettings();
+    fetchServerData();
+    return () => { cancelled = true; };
   }, [effectivelyAuthed]);
 
   // Listen for the hard-signout event fired by the api-client 401 interceptor.

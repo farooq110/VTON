@@ -40,7 +40,7 @@ export const requireAuth: RequestHandler = async (
     // Confirm the admin still exists (cheap)
     const admin = await prisma.admin.findUnique({
       where: { id: payload.sub },
-      select: { id: true, email: true, role: true },
+      select: { id: true, email: true, role: true, franchiseId: true },
     });
     if (!admin) {
       return res.status(401).json({
@@ -54,6 +54,9 @@ export const requireAuth: RequestHandler = async (
       sub: admin.id,
       email: admin.email,
       role: admin.role,
+      // Issue 1 fix — include franchiseId so settings/brand can be scoped.
+      // NULL for super_admin → falls back to "global" scope.
+      franchiseId: admin.franchiseId ?? 'global',
     };
     next();
   } catch (err) {
@@ -83,10 +86,15 @@ export const optionalAuth: RequestHandler = async (
     const payload = verifyToken(token);
     const admin = await prisma.admin.findUnique({
       where: { id: payload.sub },
-      select: { id: true, email: true, role: true },
+      select: { id: true, email: true, role: true, franchiseId: true },
     });
     if (admin) {
-      req.user = { sub: admin.id, email: admin.email, role: admin.role };
+      req.user = {
+        sub: admin.id,
+        email: admin.email,
+        role: admin.role,
+        franchiseId: admin.franchiseId ?? 'global',
+      };
     }
   } catch {
     // ignore — optional

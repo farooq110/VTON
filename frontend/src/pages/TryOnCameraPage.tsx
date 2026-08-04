@@ -79,12 +79,10 @@ export function TryOnCameraPage() {
   useEffect(() => {
     const currentSelected = useAuthStore.getState().selectedProductId;
     if (!currentSelected) {
-      // Issue 4 fix — use variant: "warning" (amber) so the toast is
-      // clearly a friendly warning, not a red error.
       toast({
         title: "Please select a garment first",
         description: "Browse the collection and pick a piece to try on before opening the camera.",
-        variant: "warning",
+        // No `variant: "destructive"` — friendly warning.
       });
       navigate("/products", { replace: true });
     }
@@ -227,12 +225,11 @@ export function TryOnCameraPage() {
   const tryWithSavedImage = useCallback((img: SavedCaptureImage) => {
     stopCamera();
     if (!product) {
-      // Issue 4 fix — use variant: "warning" (amber) so the toast is
-      // clearly a friendly warning, not a red error.
+      // Issue 2 fix — friendly warning (not red error).
       toast({
         title: "Please select a garment first",
         description: "Browse the collection and pick a garment to try on.",
-        variant: "warning",
+        // No `variant: "destructive"` — friendly warning.
       });
       return; // stay on the camera page — don't navigate away
     }
@@ -378,8 +375,12 @@ export function TryOnCameraPage() {
                   </span>
                 </div>
 
-                {/* Fixed bottom action bar — Retake + Save & Try On (matches preview app) */}
-                <div className="absolute bottom-0 left-0 right-0 p-3 sm:p-6 bg-gradient-to-t from-foreground/90 to-transparent flex gap-2 sm:gap-3">
+                {/* Fixed bottom action bar — Retake + Save & Try On.
+                    Issue 4 fix — added `z-10` and `max-w-2xl mx-auto` so
+                    the buttons stay centered and don't shift after the
+                    countdown finishes. The `items-stretch` ensures both
+                    buttons have the same height. */}
+                <div className="absolute bottom-0 left-0 right-0 z-10 p-3 sm:p-6 bg-gradient-to-t from-foreground/95 via-foreground/80 to-transparent flex items-stretch gap-2 sm:gap-3 max-w-2xl mx-auto">
                   <button
                     onClick={retake}
                     className="flex-1 h-14 rounded-xl bg-foreground/30 backdrop-blur-md text-primary-foreground border border-primary-foreground/30 font-medium flex items-center justify-center gap-2 hover:bg-foreground/40 transition text-sm sm:text-base"
@@ -562,10 +563,6 @@ export function TryOnCameraPage() {
         open={showAddPerson}
         onModalOpen={() => stopCamera()}
         onClose={() => setShowAddPerson(false)}
-        // Issue 6 fix — hide the "Capture from camera" option inside the
-        // Add Person modal because the Try-On Camera page ALREADY has its
-        // own camera. Showing it here would be redundant.
-        hideCameraOption
       />
     </div>
   );

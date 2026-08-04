@@ -35,7 +35,7 @@ import apiClient from "@/lib/api-client";
  * AND clears any uploaded images (customLogoUrl, customCoverBannerUrl).
  */
 export function SettingsPage() {
-  const { settings, updateSettings, resetSettings, user, brand } = useAuthStore();
+  const { settings, updateSettings, user, brand } = useAuthStore();
   const userRole = user?.role;
   const { toast } = useToast();
 
@@ -101,10 +101,24 @@ export function SettingsPage() {
         state.setBrandCoverImage(draftBrand.customCoverBannerUrl ?? null);
       }
 
-      // 2. POST to the server (fire-and-forget — best-effort).
+      // 2. POST to the server. Issue 6 fix — only send custom fields, NOT
+      // the base `name` field. The backend should only update `customName`,
+      // `customLogoUrl`, `customCoverBannerUrl` — NOT `name` (which is the
+      // original brand name and should never change from the settings UI).
+      const brandPatch: Record<string, unknown> = {};
+      if (draftBrand.customName !== state.brand.customName) {
+        brandPatch.customName = draftBrand.customName ?? null;
+      }
+      if (draftBrand.customLogoUrl !== state.brand.customLogoUrl) {
+        brandPatch.customLogoUrl = draftBrand.customLogoUrl ?? null;
+      }
+      if (draftBrand.customCoverBannerUrl !== state.brand.customCoverBannerUrl) {
+        brandPatch.customCoverBannerUrl = draftBrand.customCoverBannerUrl ?? null;
+      }
+
       await Promise.allSettled([
         apiClient.put("/settings", draftSettings),
-        apiClient.put("/brand", draftBrand),
+        apiClient.put("/brand", brandPatch),
       ]);
 
       logger.settings("Settings saved to server");
@@ -118,40 +132,58 @@ export function SettingsPage() {
     }
   };
 
-  // ─── RESET (apply defaults immediately + clear uploads from server) ───
+  // ─── RESET (Issue 3: reset to server defaults) ────────────────────────
   const [isResetting, setIsResetting] = useState(false);
 
   const handleReset = async () => {
     setIsResetting(true);
     logger.interaction("Reset settings clicked", { component: "SettingsPage" });
     try {
-      // 1. Apply defaults to the DRAFT immediately.
-      const defaultSettings = structuredClone(DEFAULT_SETTINGS);
-      const defaultBrand: Brand = {
-        ...brand,
-        customName: undefined,
-        customLogoUrl: undefined,
-        customCoverBannerUrl: undefined,
-      };
-      setDraftSettings(defaultSettings);
-      setDraftBrand(defaultBrand);
+      // Issue 3 fix — call the server's DELETE /api/settings to reset
+      // to the server-side defaults. The server deletes the existing
+      // settings row and re-creates one with DB defaults (which match
+      // the UI's DEFAULT_SETTINGS). The server returns the reset settings.
+      // Also clear brand customizations via DELETE endpoints.
+      const [settingsRes, , ,] = await Promise.allSettled([
+        apiClient.delete("/settings"),
+        apiClient.delete("/brand/logo"),
+        apiClient.delete("/brand/cover"),
+        apiClient.put("/brand", {
+          customName: null,
+          customLogoUrl: null,
+          customCoverBannerUrl: null,
+        }),
+      ]);
 
-      // 2. Commit to the store immediately (so the UI reflects defaults).
-      resetSettings();
+      // Fetch the reset settings from the server response.
+      let resetSettings: TryOnSettings | null = null;
+      if (settingsRes.status === "fulfilled") {
+        const body = settingsRes.value?.data;
+        const inner = body?.data ?? body;
+        resetSettings = inner?.settings ?? inner;
+      }
+
+      // If we got settings from the server, use them. Otherwise fall back
+      // to the frontend's DEFAULT_SETTINGS.
+      const finalSettings = resetSettings ?? structuredClone(DEFAULT_SETTINGS);
+
+      // Apply to the draft + store immediately.
+      setDraftSettings(finalSettings);
+      updateSettings(finalSettings);
+
+      // Reset brand customizations in the store.
       const state = useAuthStore.getState();
       state.setBrandName(null);
       state.setBrandLogo(null);
       state.setBrandCoverImage(null);
+      setDraftBrand({
+        ...state.brand,
+        customName: undefined,
+        customLogoUrl: undefined,
+        customCoverBannerUrl: undefined,
+      });
 
-      // 3. DELETE uploaded images from the server + persist defaults.
-      await Promise.allSettled([
-        apiClient.put("/settings", defaultSettings),
-        apiClient.put("/brand", defaultBrand),
-        apiClient.delete("/brand/logo"),
-        apiClient.delete("/brand/cover"),
-      ]);
-
-      toast({ title: "Settings reset", description: "All settings reverted to defaults. Uploaded images removed." });
+      toast({ title: "Settings reset", description: "All settings restored to server defaults." });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to reset settings.";
       toast({ title: "Reset failed", description: msg, variant: "destructive" });

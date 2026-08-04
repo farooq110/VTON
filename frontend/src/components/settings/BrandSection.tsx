@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Image as ImageIcon,
@@ -42,12 +42,21 @@ export function BrandSection({ draftBrand, patchDraftBrand }: BrandSectionProps)
 
   const coverInputRef = useRef<HTMLInputElement | null>(null);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
+  // Issue 5 fix — sync nameValue with draftBrand when it changes externally
+  // (e.g. after Reset). Previously nameValue was only initialized once and
+  // never updated when draftBrand changed, so the reset didn't clear the
+  // custom name in the input field.
   const [nameValue, setNameValue] = useState(draftBrand.customName ?? draftBrand.name);
   const [coverUrlValue, setCoverUrlValue] = useState("");
   const [logoUrlValue, setLogoUrlValue] = useState("");
   const [isUploadingCover, setIsUploadingCover] = useState(false);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Issue 5 fix — sync nameValue when draftBrand changes (e.g. after Reset).
+  useEffect(() => {
+    setNameValue(draftBrand.customName ?? draftBrand.name);
+  }, [draftBrand.customName, draftBrand.name]);
 
   const activeCoverUrl = resolveAssetUrl(draftBrand.customCoverBannerUrl) ?? resolveAssetUrl(draftBrand.coverBannerUrl);
   const activeLogoUrl = resolveAssetUrl(draftBrand.customLogoUrl) ?? resolveAssetUrl(draftBrand.logoUrl);
@@ -174,6 +183,39 @@ export function BrandSection({ draftBrand, patchDraftBrand }: BrandSectionProps)
 
   return (
     <div className="space-y-6 pt-2">
+      {/* ─── Brand name — at the TOP of Brand Identity (Issue 2) ──── */}
+      <div className="space-y-2">
+        <Label className="flex items-center gap-1.5">
+          <Type className="h-3.5 w-3.5" /> Brand name
+        </Label>
+        <Input
+          value={nameValue}
+          onChange={(e) => {
+            handleNameChange(e.target.value);
+            setError(null);
+          }}
+          placeholder={draftBrand.name}
+          className="h-10"
+          maxLength={50}
+        />
+        <p className="text-[11px] text-muted-foreground">
+          Displayed in the header and footer. Default:{" "}
+          <code className="font-mono">{draftBrand.name}</code>.
+          {draftBrand.customName && (
+            <button
+              onClick={() => {
+                patchDraftBrand({ customName: undefined });
+                setNameValue(draftBrand.name);
+                toast({ title: "Brand name reset", description: "Click Save to apply." });
+              }}
+              className="ml-2 text-accent hover:underline"
+            >
+              Reset to default
+            </button>
+          )}
+        </p>
+      </div>
+
       {/* ─── Live preview ──────────────────────────────────────── */}
       <div className="space-y-2">
         <Label>Live preview</Label>
@@ -212,42 +254,6 @@ export function BrandSection({ draftBrand, patchDraftBrand }: BrandSectionProps)
         </div>
         <p className="text-xs text-muted-foreground">
           Shows the current cover image, logo, and brand name as they appear on the home screen.
-        </p>
-      </div>
-
-      {/* ─── Brand name ────────────────────────────────────────── */}
-      <div className="space-y-2">
-        <Label className="flex items-center gap-1.5">
-          <Type className="h-3.5 w-3.5" /> Brand name
-        </Label>
-        {/* Issue 1 fix — removed the per-field Save button. The brand name
-            input now patches the DRAFT on every keystroke; the header Save
-            button persists it to the store + server. */}
-        <Input
-          value={nameValue}
-          onChange={(e) => {
-            handleNameChange(e.target.value);
-            setError(null);
-          }}
-          placeholder={draftBrand.name}
-          className="h-10"
-          maxLength={50}
-        />
-        <p className="text-[11px] text-muted-foreground">
-          Displayed in the header and footer. Default:{" "}
-          <code className="font-mono">{draftBrand.name}</code>.
-          {draftBrand.customName && (
-            <button
-              onClick={() => {
-                patchDraftBrand({ customName: undefined });
-                setNameValue(draftBrand.name);
-                toast({ title: "Brand name reset", description: "Click Save to apply." });
-              }}
-              className="ml-2 text-accent hover:underline"
-            >
-              Reset to default
-            </button>
-          )}
         </p>
       </div>
 

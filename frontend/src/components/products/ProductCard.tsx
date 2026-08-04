@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { formatPrice, resolveProductImage, onImageError } from "@/lib/utils";
 import { logger } from "@/lib/logger";
 import { ProductImage } from "@/components/products/ProductImage";
+import { useAuthStore } from "@/lib/store";
 import type { Product } from "@/types";
 
 /**
@@ -51,6 +52,8 @@ export function ProductCard({
   variant = "grid",
 }: ProductCardProps) {
   const cardRef = useRef<HTMLDivElement | null>(null);
+  // Issue 4 fix — read currency from settings (default PKR).
+  const currency = useAuthStore((s) => s.settings.currency);
 
   // When a card expands, scroll it into view so the expanded actions (TRY ON +
   // Details buttons) are fully visible — not clipped by the viewport edges.
@@ -126,7 +129,7 @@ export function ProductCard({
             <h3 className="font-display text-sm sm:text-base font-medium leading-tight line-clamp-2">{product.name}</h3>
             <p className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 font-mono">{product.sku}</p>
             <div className="mt-1 sm:mt-auto sm:pt-2 flex items-center justify-between">
-              <span className="text-sm sm:text-base font-semibold">{formatPrice(product.price, product.currency)}</span>
+              <span className="text-sm sm:text-base font-semibold">{formatPrice(product.price, currency)}</span>
               <span className="text-[10px] sm:text-[11px] text-muted-foreground">{product.colors.length}c</span>
             </div>
           </div>

@@ -90,47 +90,43 @@ function defaultDto(): SettingsDto {
   };
 }
 
-export async function getSettings(): Promise<SettingsDto> {
-  const brand = await prisma.brand.findFirst({
-    where: { isActive: true },
-    orderBy: { createdAt: 'asc' },
-  });
+/**
+ * Issue 1 fix — returns the franchiseId from the request's authenticated user.
+ * This is the key used to scope settings per franchise. Falls back to "global"
+ * for super_admin users who don't belong to a specific franchise.
+ */
+function getFranchiseScope(req: { user?: { franchiseId?: string } | null }): string {
+  return req.user?.franchiseId ?? 'global';
+}
 
-  if (!brand) {
-    svcLogger.info('No active brand — returning default settings');
-    return defaultDto();
-  }
-
+/**
+ * Issue 1 fix — returns the settings for the user's franchise.
+ * If no Setting row exists for this franchise, one is seeded with defaults.
+ */
+export async function getSettings(req: { user?: { franchiseId?: string } | null }): Promise<SettingsDto> {
+  const franchiseId = getFranchiseScope(req);
   let setting = await prisma.setting.findUnique({
-    where: { brandId: brand.id },
+    where: { franchiseId },
   });
-
   if (!setting) {
-    svcLogger.info({ brandId: brand.id }, 'No settings row — seeding defaults');
-    setting = await prisma.setting.create({
-      data: { brandId: brand.id },
-    });
+    svcLogger.info({ franchiseId }, 'No settings row — seeding defaults');
+    setting = await prisma.setting.create({ data: { franchiseId } });
   }
-
   return toDto(setting);
 }
 
-export async function updateSettings(patch: SettingsUpdateInput): Promise<SettingsDto> {
-  const brand = await prisma.brand.findFirst({
-    where: { isActive: true },
-    orderBy: { createdAt: 'asc' },
-  });
-
-  if (!brand) {
-    throw new Error('No active brand found — cannot update settings');
-  }
+/**
+ * Issue 1 fix — updates settings for the user's franchise.
+ */
+export async function updateSettings(
+  req: { user?: { franchiseId?: string } | null },
+  patch: SettingsUpdateInput,
+): Promise<SettingsDto> {
+  const franchiseId = getFranchiseScope(req);
 
   const data: Record<string, unknown> = {};
   if (patch.currency !== undefined) data.currency = patch.currency;
-  if (patch.priceRange !== undefined) {
-    data.priceRangeMin = patch.priceRange.min;
-    data.priceRangeMax = patch.priceRange.max;
-  }
+  if (patch.priceRange !== undefined) { data.priceRangeMin = patch.priceRange.min; data.priceRangeMax = patch.priceRange.max; }
   if (patch.personDetectionModelId !== undefined) data.personDetectionModelId = patch.personDetectionModelId;
   if (patch.postureModelId !== undefined) data.postureModelId = patch.postureModelId;
   if (patch.poseThresholds !== undefined) data.poseThresholds = JSON.stringify(patch.poseThresholds);
@@ -151,33 +147,21 @@ export async function updateSettings(patch: SettingsUpdateInput): Promise<Settin
   }
 
   const setting = await prisma.setting.upsert({
-    where: { brandId: brand.id },
-    create: { brandId: brand.id, ...data },
+    where: { franchiseId },
+    create: { franchiseId, ...data },
     update: data,
   });
-
-  svcLogger.info({ brandId: brand.id }, 'settings updated');
+  svcLogger.info({ franchiseId }, 'settings updated');
   return toDto(setting);
 }
 
-export async function resetSettings(): Promise<SettingsDto> {
-  const brand = await prisma.brand.findFirst({
-    where: { isActive: true },
-    orderBy: { createdAt: 'asc' },
-  });
-
-  if (!brand) {
-    return defaultDto();
-  }
-
-  await prisma.setting.deleteMany({
-    where: { brandId: brand.id },
-  });
-
-  const setting = await prisma.setting.create({
-    data: { brandId: brand.id },
-  });
-
-  svcLogger.info({ brandId: brand.id }, 'settings reset to defaults');
+/**
+ * Issue 1 fix — resets settings to defaults for the user's franchise.
+ */
+export async function resetSettings(req: { user?: { franchiseId?: string } | null }): Promise<SettingsDto> {
+  const franchiseId = getFranchiseScope(req);
+  await prisma.setting.deleteMany({ where: { franchiseId } });
+  const setting = await prisma.setting.create({ data: { franchiseId } });
+  svcLogger.info({ franchiseId }, 'settings reset to defaults');
   return toDto(setting);
 }

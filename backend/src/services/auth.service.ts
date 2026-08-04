@@ -41,12 +41,29 @@ export async function login(input: SigninInput): Promise<AuthResult> {
 
   let admin = await prisma.admin.findUnique({
     where: { email: lower },
+    // Issue 1 fix — select franchiseId so we can return it to the frontend.
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      passwordHash: true,
+      franchiseId: true,
+    },
   });
 
   if (!admin && input.identifier) {
     // Fall back to a case-insensitive name match (franchise-name login).
     admin = await prisma.admin.findFirst({
       where: { name: { contains: input.identifier, mode: 'insensitive' } },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        passwordHash: true,
+        franchiseId: true,
+      },
     });
   }
 
@@ -70,8 +87,10 @@ export async function login(input: SigninInput): Promise<AuthResult> {
   // frontend's User type is always satisfied.
   let brandId = `brand_${admin.id}`;
   try {
+    // Issue 1 fix — find brand by the admin's franchiseId first, then fallback.
+    const fId = admin.franchiseId ?? 'global';
     const brand = await prisma.brand.findFirst({
-      where: { isActive: true },
+      where: { OR: [{ franchiseId: fId }, { isActive: true }] },
       orderBy: { createdAt: 'asc' },
       select: { id: true },
     });
@@ -90,10 +109,9 @@ export async function login(input: SigninInput): Promise<AuthResult> {
       name: admin.name,
       role: admin.role,
       brandId,
-      // Synthesize a stable franchise id from the admin id — admins aren't
-      // tied to a specific franchise in the schema. The frontend uses this
-      // only for the /tryon/track payload (best-effort attribution).
-      franchiseId: `franchise_${admin.id}`,
+      // Issue 1 fix — return the admin's actual franchiseId from the DB
+      // (not a synthetic one). NULL → "global" for super_admin.
+      franchiseId: admin.franchiseId ?? 'global',
     },
   };
 }

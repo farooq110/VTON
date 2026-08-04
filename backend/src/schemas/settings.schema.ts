@@ -1,10 +1,5 @@
 import { z } from 'zod';
 
-/**
- * Settings schemas — used by the frontend's SettingsPage to persist
- * theme, currency, model IDs, thresholds, compression, etc.
- */
-
 export const themeSchema = z.object({
   primaryColor: z.string(),
   accentColor: z.string(),

@@ -7,12 +7,12 @@ import * as brandService from '../services/brand.service';
 import { sendOk } from '../utils/response';
 
 /**
- * Brand routes — public read, admin write.
+ * Brand routes — public read, admin write. Scoped per franchise (Issue 1 fix).
  *
- *   GET    /api/brand         → active brand (or seed default)
+ *   GET    /api/brand         → franchise's brand (or seed default)
  *   GET    /api/brand/list    → all brands
  *   PATCH  /api/brand/:id     → update brand by ID (auth required)
- *   PUT    /api/brand         → upsert active brand (auth required)
+ *   PUT    /api/brand         → upsert franchise's brand (auth required)
  *   DELETE /api/brand/logo    → clear custom logo (auth required)
  *   DELETE /api/brand/cover   → clear custom cover (auth required)
  */
@@ -21,8 +21,8 @@ const router = Router();
 router.get(
   '/',
   optionalAuth,
-  asyncHandler(async (_req, res) => {
-    const brand = await brandService.getActiveBrand();
+  asyncHandler(async (req, res) => {
+    const brand = await brandService.getActiveBrand(req);
     return sendOk(res, { brand });
   }),
 );
@@ -51,7 +51,7 @@ router.put(
   requireAuth,
   validate({ body: brandUpdateSchema }),
   asyncHandler(async (req, res) => {
-    const updated = await brandService.upsertActiveBrand(req.body);
+    const updated = await brandService.upsertActiveBrand(req, req.body);
     return sendOk(res, { brand: updated }, 200, 'Brand saved');
   }),
 );
@@ -59,8 +59,8 @@ router.put(
 router.delete(
   '/logo',
   requireAuth,
-  asyncHandler(async (_req, res) => {
-    const brand = await brandService.clearCustomLogo();
+  asyncHandler(async (req, res) => {
+    const brand = await brandService.clearCustomLogo(req);
     return sendOk(res, { brand }, 200, 'Custom logo cleared');
   }),
 );
@@ -68,8 +68,8 @@ router.delete(
 router.delete(
   '/cover',
   requireAuth,
-  asyncHandler(async (_req, res) => {
-    const brand = await brandService.clearCustomCover();
+  asyncHandler(async (req, res) => {
+    const brand = await brandService.clearCustomCover(req);
     return sendOk(res, { brand }, 200, 'Custom cover cleared');
   }),
 );

@@ -157,8 +157,6 @@ export function migrateSettings(persisted: Partial<TryOnSettings>): TryOnSetting
   if (merged.priceRange.max < merged.priceRange.min) {
     merged.priceRange.max = merged.priceRange.min;
   }
-  // Ensure currency is always present. Old persisted settings (pre currency
-  // feature) won't have this field — default to PKR.
   if (!merged.currency || typeof merged.currency !== "string") {
     merged.currency = defaults.currency;
   }

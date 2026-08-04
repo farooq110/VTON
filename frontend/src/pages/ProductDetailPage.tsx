@@ -8,6 +8,8 @@ export function ProductDetailPage() {
   const navigate = useNavigate();
   const { data: product, isLoading } = useProduct(id);
   const selectProduct = useAuthStore((s) => s.selectProduct);
+  // Issue 4 fix — read currency from settings (default PKR).
+  const currency = useAuthStore((s) => s.settings.currency);
 
   if (isLoading) return <div className="min-h-screen grid place-items-center bg-background"><p className="text-muted-foreground">Loading…</p></div>;
   if (!product) return <div className="min-h-screen grid place-items-center bg-background"><p>Not found.</p></div>;
@@ -36,7 +38,7 @@ export function ProductDetailPage() {
           <div>
             <p className="text-xs font-mono text-muted-foreground">{product.sku} · {product.code}</p>
             <h2 className="font-display text-3xl sm:text-4xl mt-2">{product.name}</h2>
-            <p className="text-2xl font-semibold mt-3">{formatPrice(product.price, product.currency)}</p>
+            <p className="text-2xl font-semibold mt-3">{formatPrice(product.price, currency)}</p>
           </div>
           <p className="text-sm text-muted-foreground leading-relaxed">{product.description}</p>
           <div>

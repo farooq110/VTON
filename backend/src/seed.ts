@@ -74,95 +74,110 @@ async function main(): Promise<void> {
   log('Admin user ready', { id: admin.id, email: admin.email });
 
   // --- Boutique demo admins (the "tap to fill" rows on SignInPage) -------
-  // These credentials are shown verbatim on the boutique frontend's sign-in
-  // page. They must exist in the DB or the demo buttons will fail with 401.
+  // Issue 1 fix — each demo admin gets a franchiseId so their settings + brand
+  // are scoped per franchise. super_admin gets null (global scope).
+  const BOUTIQUE_FRANCHISE_MAP: Record<string, string | null> = {
+    super_admin: null,
+    developer: 'franchise_dev',
+    manager: 'franchise_nyc',
+    public_user: 'franchise_nyc',
+  };
   for (const demo of BOUTIQUE_DEMO_ADMINS) {
     const hash = await bcrypt.hash(demo.password, 12);
+    const fId = BOUTIQUE_FRANCHISE_MAP[demo.role] ?? null;
     const row = await prisma.admin.upsert({
       where: { email: demo.email },
-      update: { passwordHash: hash, role: demo.role, name: demo.name },
+      update: { passwordHash: hash, role: demo.role, name: demo.name, franchiseId: fId },
       create: {
         email: demo.email,
         name: demo.name,
         passwordHash: hash,
         role: demo.role,
+        franchiseId: fId,
       },
     });
-    log(`Boutique demo admin ready`, { email: row.email, role: row.role });
+    log(`Boutique demo admin ready`, { email: row.email, role: row.role, franchiseId: fId });
   }
 
-  // --- Brand (storefront identity for the boutique frontend) -------------
-  const existingBrand = await prisma.brand.findFirst({ where: { isActive: true } });
-  let brandId: string;
-  if (!existingBrand) {
-    const brand = await prisma.brand.create({
-      data: {
-        name: 'Atelier Nova',
-        tagline: 'Try then Buy',
-        primaryColor: '#1c1917',
-        accentColor: '#d4a017',
-        isActive: true,
-      },
-    });
-    brandId = brand.id;
-    log('Brand seeded (Atelier Nova)');
-  } else {
-    brandId = existingBrand.id;
-    log('Brand already exists, skipping seed');
-  }
+  // --- Brand + Settings (Issue 1 fix: franchise-scoped) -----------------
+  // Each demo admin gets a franchiseId. The brand + settings are scoped
+  // per franchise so each franchise has its own identity + config.
+  // super_admin gets franchiseId = null (global scope).
 
-  // --- Settings (app-wide settings for the active brand) -----------------
-  // Issue 3 fix — seed the Setting row with the UI's default values so
-  // GET /api/settings returns the correct defaults on first load (currency
-  // PKR, theme colors, model IDs, thresholds, compression, etc.).
-  const existingSettings = await prisma.setting.findUnique({
-    where: { brandId },
-  });
-  if (!existingSettings) {
-    await prisma.setting.create({
-      data: {
-        brandId,
-        currency: 'PKR',
-        priceRangeMin: 0,
-        priceRangeMax: 10000,
-        personDetectionModelId: 'yolov8n-pose',
-        postureModelId: 'yolov8n-pose',
-        poseThresholds: JSON.stringify({
-          personScore: 0.6,
-          shoulderTiltDeg: 12,
-          faceYawDeg: 18,
-          facePitchDeg: 15,
-          minBodyVisibility: 0.55,
-        }),
-        personDetectionParams: JSON.stringify({
-          confidenceThreshold: 0.6,
-          nmsIouThreshold: 0.5,
-          maxPersons: 10,
-        }),
-        compression: JSON.stringify({
-          maxFileSizeKb: 1000,
-          minQuality: 0.7,
-          qualityStep: 0.05,
-          dimensionStep: 0.05,
-          stripMetadata: true,
-          stripChunks: true,
-        }),
-        captureTimerSeconds: 3,
-        taglineRefreshMs: 2400,
-        productTapBehavior: 'expand',
-        debugLogging: false,
-        telemetryEnabled: false,
-        autoPreloadModel: false,
-        themePrimaryColor: '#7c2d4a',
-        themeAccentColor: '#c9a55c',
-        themeBackgroundColor: '#faf8f5',
-        themeFontFamily: 'serif',
-        themeBaseFontSize: 'base',
-      },
+  const BOUTIQUE_FRANCHISE_IDS: Record<string, string> = {
+    super_admin: 'global',
+    developer: 'franchise_dev',
+    manager: 'franchise_nyc',
+    public_user: 'franchise_nyc', // public_user shares the manager's franchise
+  };
+
+  // Seed brand + settings for each franchise scope.
+  const franchiseScopes = ['global', 'franchise_dev', 'franchise_nyc'];
+  for (const fScope of franchiseScopes) {
+    // Brand
+    const existingBrand = await prisma.brand.findFirst({ where: { franchiseId: fScope } });
+    if (!existingBrand) {
+      await prisma.brand.create({
+        data: {
+          name: 'Atelier Nova',
+          tagline: 'Try then Buy',
+          primaryColor: '#1c1917',
+          accentColor: '#d4a017',
+          isActive: true,
+          franchiseId: fScope,
+        },
+      });
+      log(`Brand seeded for franchise: ${fScope}`);
+    }
+
+    // Settings
+    const existingSettings = await prisma.setting.findUnique({
+      where: { franchiseId: fScope },
     });
-    log('Settings seeded (UI defaults: PKR currency, Plum Boutique theme, YOLOv8n-pose models)');
-  } else {
-    log('Settings already exist, skipping seed');
+    if (!existingSettings) {
+      await prisma.setting.create({
+        data: {
+          franchiseId: fScope,
+          currency: 'PKR',
+          priceRangeMin: 0,
+          priceRangeMax: 10000,
+          personDetectionModelId: 'yolov8n-pose',
+          postureModelId: 'yolov8n-pose',
+          poseThresholds: JSON.stringify({
+            personScore: 0.6,
+            shoulderTiltDeg: 12,
+            faceYawDeg: 18,
+            facePitchDeg: 15,
+            minBodyVisibility: 0.55,
+          }),
+          personDetectionParams: JSON.stringify({
+            confidenceThreshold: 0.6,
+            nmsIouThreshold: 0.5,
+            maxPersons: 10,
+          }),
+          compression: JSON.stringify({
+            maxFileSizeKb: 1000,
+            minQuality: 0.7,
+            qualityStep: 0.05,
+            dimensionStep: 0.05,
+            stripMetadata: true,
+            stripChunks: true,
+          }),
+          captureTimerSeconds: 3,
+          taglineRefreshMs: 2400,
+          productTapBehavior: 'expand',
+          debugLogging: false,
+          telemetryEnabled: false,
+          autoPreloadModel: false,
+          themePrimaryColor: '#7c2d4a',
+          themeAccentColor: '#c9a55c',
+          themeBackgroundColor: '#faf8f5',
+          themeFontFamily: 'serif',
+          themeBaseFontSize: 'base',
+        },
+      });
+      log(`Settings seeded for franchise: ${fScope} (PKR, Plum Boutique theme, YOLOv8n-pose)`);
+    }
   }
 
   // --- Products (dummy catalog so the boutique UI isn't empty) ----------

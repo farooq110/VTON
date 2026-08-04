@@ -3,20 +3,8 @@ import { logger } from '../lib/logger';
 import type { Brand } from '@prisma/client';
 import type { BrandUpdateInput } from '../schemas/brand.schema';
 
-/**
- * Brand service — storefront identity.
- *
- * The frontend reads the brand via `GET /api/brand` to render the HomePage
- * cover banner, logo, name, and tagline ("Try then Buy"). The admin portal
- * updates it via `PATCH /api/brand/:id`.
- *
- * All Prisma access goes through this service — routes never touch prisma
- * directly (Dependency Inversion + Single Responsibility).
- */
-
 const svcLogger = logger.child({ service: 'brand' });
 
-/** Shape returned to the frontend — matches the frontend's `Brand` type. */
 export interface BrandDto {
   id: string;
   name: string;
@@ -29,6 +17,7 @@ export interface BrandDto {
   primaryColor: string | null;
   accentColor: string | null;
   isActive: boolean;
+  franchiseId?: string | null;
 }
 
 function toDto(b: Brand): BrandDto {
@@ -44,21 +33,45 @@ function toDto(b: Brand): BrandDto {
     primaryColor: b.primaryColor,
     accentColor: b.accentColor,
     isActive: b.isActive,
+    franchiseId: b.franchiseId,
   };
 }
 
+function stripNonDataFields(patch: BrandUpdateInput): Record<string, unknown> {
+  const { id: _id, isActive: _isActive, ...dataFields } = patch;
+  void _id;
+  void _isActive;
+  return dataFields;
+}
+
 /**
- * Returns the active brand. If no brand row exists yet (fresh install), one is
- * seeded with sensible defaults so the frontend's HomePage is never empty.
+ * Issue 1 fix — returns the franchiseId from the request's authenticated user.
  */
-export async function getActiveBrand(): Promise<BrandDto> {
+function getFranchiseScope(req: { user?: { franchiseId?: string } | null }): string {
+  return req.user?.franchiseId ?? 'global';
+}
+
+/**
+ * Issue 1 fix — returns the brand for the user's franchise.
+ * If no brand row exists for this franchise, one is seeded with defaults.
+ */
+export async function getActiveBrand(req: { user?: { franchiseId?: string } | null }): Promise<BrandDto> {
+  const franchiseId = getFranchiseScope(req);
   let brand = await prisma.brand.findFirst({
-    where: { isActive: true },
+    where: { franchiseId },
     orderBy: { createdAt: 'asc' },
   });
 
   if (!brand) {
-    svcLogger.info('No active brand found — seeding default brand record.');
+    // Fallback: try any active brand (for backward compat with pre-franchise data).
+    brand = await prisma.brand.findFirst({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  if (!brand) {
+    svcLogger.info({ franchiseId }, 'No brand found — seeding default brand');
     brand = await prisma.brand.create({
       data: {
         name: 'Atelier Nova',
@@ -66,6 +79,7 @@ export async function getActiveBrand(): Promise<BrandDto> {
         primaryColor: '#1c1917',
         accentColor: '#d4a017',
         isActive: true,
+        franchiseId,
       },
     });
   }
@@ -77,9 +91,10 @@ export async function updateBrand(
   id: string,
   patch: BrandUpdateInput,
 ): Promise<BrandDto> {
+  const data = stripNonDataFields(patch);
   const updated = await prisma.brand.update({
     where: { id },
-    data: patch,
+    data,
   });
   svcLogger.info({ brandId: id }, 'brand updated');
   return toDto(updated);
@@ -93,49 +108,68 @@ export async function listBrands(): Promise<BrandDto[]> {
 }
 
 /**
- * Upserts the active brand — creates it if none exists, updates if it does.
- * Called by `PUT /api/brand` from the frontend's SettingsPage Save button.
+ * Issue 1 fix — upserts the brand for the user's franchise.
  */
 export async function upsertActiveBrand(
+  req: { user?: { franchiseId?: string } | null },
   patch: BrandUpdateInput,
 ): Promise<BrandDto> {
+  const franchiseId = getFranchiseScope(req);
+  const data = stripNonDataFields(patch);
+
   let brand = await prisma.brand.findFirst({
-    where: { isActive: true },
+    where: { franchiseId },
     orderBy: { createdAt: 'asc' },
   });
 
   if (!brand) {
+    // Fallback: try any active brand.
+    brand = await prisma.brand.findFirst({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  if (!brand) {
     brand = await prisma.brand.create({
       data: {
-        name: patch.name ?? 'Atelier Nova',
-        tagline: patch.tagline ?? 'Try then Buy',
-        logoUrl: patch.logoUrl ?? null,
-        coverBannerUrl: patch.coverBannerUrl ?? null,
-        customName: patch.customName ?? null,
-        customLogoUrl: patch.customLogoUrl ?? null,
-        customCoverBannerUrl: patch.customCoverBannerUrl ?? null,
-        primaryColor: patch.primaryColor ?? '#1c1917',
-        accentColor: patch.accentColor ?? '#d4a017',
+        name: (data.name as string) ?? 'Atelier Nova',
+        tagline: (data.tagline as string) ?? 'Try then Buy',
+        logoUrl: (data.logoUrl as string | null) ?? null,
+        coverBannerUrl: (data.coverBannerUrl as string | null) ?? null,
+        customName: (data.customName as string | null) ?? null,
+        customLogoUrl: (data.customLogoUrl as string | null) ?? null,
+        customCoverBannerUrl: (data.customCoverBannerUrl as string | null) ?? null,
+        primaryColor: (data.primaryColor as string | null) ?? '#1c1917',
+        accentColor: (data.accentColor as string | null) ?? '#d4a017',
         isActive: true,
+        franchiseId,
       },
     });
-    svcLogger.info({ brandId: brand.id }, 'brand created (upsert)');
+    svcLogger.info({ brandId: brand.id, franchiseId }, 'brand created (upsert)');
   } else {
     brand = await prisma.brand.update({
       where: { id: brand.id },
-      data: patch,
+      data,
     });
-    svcLogger.info({ brandId: brand.id }, 'brand updated (upsert)');
+    svcLogger.info({ brandId: brand.id, franchiseId }, 'brand updated (upsert)');
   }
 
   return toDto(brand);
 }
 
-export async function clearCustomLogo(): Promise<BrandDto> {
-  const brand = await prisma.brand.findFirst({
-    where: { isActive: true },
+export async function clearCustomLogo(req: { user?: { franchiseId?: string } | null }): Promise<BrandDto> {
+  const franchiseId = getFranchiseScope(req);
+  let brand = await prisma.brand.findFirst({
+    where: { franchiseId },
     orderBy: { createdAt: 'asc' },
   });
+  if (!brand) {
+    brand = await prisma.brand.findFirst({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
   if (!brand) throw new Error('No active brand found');
   const updated = await prisma.brand.update({
     where: { id: brand.id },
@@ -145,11 +179,18 @@ export async function clearCustomLogo(): Promise<BrandDto> {
   return toDto(updated);
 }
 
-export async function clearCustomCover(): Promise<BrandDto> {
-  const brand = await prisma.brand.findFirst({
-    where: { isActive: true },
+export async function clearCustomCover(req: { user?: { franchiseId?: string } | null }): Promise<BrandDto> {
+  const franchiseId = getFranchiseScope(req);
+  let brand = await prisma.brand.findFirst({
+    where: { franchiseId },
     orderBy: { createdAt: 'asc' },
   });
+  if (!brand) {
+    brand = await prisma.brand.findFirst({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
   if (!brand) throw new Error('No active brand found');
   const updated = await prisma.brand.update({
     where: { id: brand.id },

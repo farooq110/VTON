@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Sparkles } from "lucide-react";
+import { ArrowLeft, Sparkles } from "lucide-react";
 import { useAuthStore } from "@/lib/store";
 import { formatRelativeTime } from "@/lib/utils";
 
@@ -59,12 +59,15 @@ export function TryOnResultPage() {
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <header className="sticky top-0 z-20 glass border-b border-border p-4 flex items-center gap-3">
-        <button onClick={tryAnother} aria-label="Back">←</button>
+        {/* Issue 5 fix — use the same ArrowLeft icon as GlobalHeader for consistency. */}
+        <button onClick={tryAnother} aria-label="Back" className="shrink-0 h-10 w-10 grid place-items-center rounded-lg hover:bg-muted transition">
+          <ArrowLeft className="h-5 w-5" />
+        </button>
         <div className="flex-1">
           <p className="text-xs uppercase tracking-widest text-muted-foreground">Your fitting</p>
           <h1 className="font-display text-lg truncate">SKU {lastResult.productSku}</h1>
         </div>
-        <button onClick={goHome} className="text-sm">Close ✕</button>
+        <button onClick={goHome} className="text-sm text-foreground hover:text-primary transition font-medium">Close ✕</button>
       </header>
 
       <main className="flex-1 grid grid-cols-1 lg:grid-cols-[1.4fr_1fr]">

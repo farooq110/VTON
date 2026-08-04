@@ -36,10 +36,9 @@ export function canAccessSettings(role: Role | undefined): boolean {
   );
 }
 
-/** Can the user manage BRAND settings — cover, name, logo? (manager + developer + super_admin)
- *  Issue 2 fix — developer now has the SAME brand permissions as manager so
- *  they can test everything (logo, cover, theme) without needing a manager
- *  account. */
+/** Can the user manage BRAND settings — cover, name, logo?
+ *  (manager + developer + super_admin) — developer has same access as manager
+ *  so they can test the full UI. */
 export function canManageBrand(role: Role | undefined): boolean {
   return role === "super_admin" || role === "manager" || role === "developer";
 }
@@ -209,11 +208,7 @@ export interface PriceRangeSettings {
 }
 
 export interface TryOnSettings {
-  /**
-   * Dynamic currency code (ISO 4217) controlled through Settings.
-   * Defaults to "PKR" (Pakistani Rupees). Used by `formatPrice`
-   * across the app so changing this one field updates every price display.
-   */
+  /** Dynamic currency code (ISO 4217). Defaults to PKR. */
   currency: string;
   /**
    * Price range bounds surfaced in the FiltersModal. Edited from the
